@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sseg"
+version = "0.1.0"
+description = "Interactive 3D MRI segmentation viewer"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Alex Ling" }
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "matplotlib",
+  "nibabel",
+  "pynrrd",
+  "pyvista",
+  "pyvistaqt",
+  "vtk",
+  "PyQt5",
+]
+
+[project.scripts]
+sseg = "sseg.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["sseg*"]

@@ -1,0 +1,62 @@
+# sseg
+
+`sseg` packages the original standalone MRI segmentation viewer as an installable
+Python application.
+
+## Install from a local checkout
+
+```bash
+pip install .
+```
+
+## Launch the GUI
+
+```bash
+sseg gui
+```
+
+This opens a startup window where you can:
+
+- select one or more MRI volumes
+- optionally preload one or more segmentation files
+- optionally choose an ROI mask
+- optionally define default output suffixes for newly created segmentations
+
+You can also skip the startup dialog and preload files directly:
+
+```bash
+sseg gui --skip-startup   --load-volumes scan.nii.gz   --load-segmentations tumor_seg.nii.gz   --roi-mask roi.nii.gz
+```
+
+## Refactor status
+
+This first packaging refactor intentionally preserves the original viewer logic in
+` sseg/viewer.py ` while introducing:
+
+- a pip-installable package structure
+- an entry-point command (`sseg`)
+- a startup workflow dialog for opening cases without hand-writing CLI arguments
+- a backward-compatible `sSegEnv.py` launcher
+
+Future cleanup can further split the viewer into dedicated modules for:
+
+- I/O and format handling
+- segmentation data model
+- rendering / display logic
+- tool controllers
+- dialogs and startup workflows
+- CLI and batch utilities
+
+
+## Current module layout
+
+The viewer has now been split into smaller modules while preserving the existing behavior:
+
+- `sseg/viewer.py` - main window, startup state, volume/segmentation management
+- `sseg/rendering.py` - 2D/3D rendering and overlay display helpers
+- `sseg/slice_views.py` - mouse, wheel, and 2D slice interaction handling
+- `sseg/segmentation_ops.py` - editing and region-growing operations
+- `sseg/io_utils.py` - load/save and orientation helpers
+- `sseg/dialogs.py` - reusable dialogs
+- `sseg/startup.py` - startup workflow dialog
+- `sseg/cli.py` - package entry point
