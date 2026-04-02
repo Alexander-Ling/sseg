@@ -29,7 +29,7 @@ from pyvistaqt import BackgroundPlotter
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QGridLayout, QWidget, QGraphicsView, QGraphicsScene, QMenu, QWidgetAction,
                              QMenuBar, QAction, QVBoxLayout, QHBoxLayout, QSlider, QLabel, QDialog, QPushButton, QGraphicsPixmapItem,
                              QComboBox, QToolBar, QMessageBox, QProgressDialog, QInputDialog, QLineEdit, QSpinBox, QGraphicsEllipseItem,
-                             QFileDialog)
+                             QFileDialog, QDockWidget, QTreeWidget, QTreeWidgetItem)
 from PyQt5.QtGui import QImage, QPixmap, QMouseEvent, QCursor, QPen, QColor, QPainter, QIntValidator, QDoubleValidator, QTransform
 from scipy.ndimage import rotate, binary_dilation, binary_erosion
 import matplotlib.pyplot as plt
@@ -107,11 +107,15 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
         # Initialize parameters for 3-d opacity calculations
         self.default_steepness = 20
-        self.default_exponent = 4
+        self.default_exponent = 3
         self.default_opacity_multiplier = 150
         self.steepness = self.default_steepness
         self.exponent = self.default_exponent
         self.opacity_multiplier = self.default_opacity_multiplier
+        # Auto 3D opacity is currently deprecated because the recent automatic
+        # transfer-function heuristic could make brains fully transparent.
+        # Keep the flag for backwards compatibility, but default to manual.
+        self.auto_3d_opacity = False
 
         self.view_axial = QGraphicsView()
         self.view_coronal = QGraphicsView()
@@ -365,6 +369,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.undo_stack = []
         self.redo_stack = []
         self.segmentation_dirty = {}
+        self.batch_current_exam = None
 
         self._clear_combo_items(self.volume_combo)
         self._clear_combo_items(self.segmentation_combo, keep_items=["None", "Create new segmentation"])
@@ -383,6 +388,60 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         if key:
             self.segmentation_dirty[key] = bool(dirty)
 
+    def prompt_save_discard_or_cancel(self, title="Unsaved Changes", message=None):
+        if not self.has_unsaved_segmentations():
+            return "discard"
+        if message is None:
+            message = "There are unsaved segmentation changes in the current environment. Do you want to save them before continuing?"
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        save_btn = msg_box.addButton("Save", QMessageBox.AcceptRole)
+        discard_btn = msg_box.addButton("Discard", QMessageBox.DestructiveRole)
+        cancel_btn = msg_box.addButton(QMessageBox.Cancel)
+        msg_box.setDefaultButton(save_btn)
+        msg_box.exec_()
+        clicked = msg_box.clickedButton()
+        if clicked == save_btn:
+            return "save"
+        if clicked == discard_btn:
+            return "discard"
+        return "cancel"
+
+    def save_dirty_segmentations_interactive(self):
+        dirty_keys = [key for key, dirty in self.segmentation_dirty.items() if dirty and key in self.segmentation_volumes]
+        if not dirty_keys:
+            return True
+        original_key = self.current_segmentation_key
+        for key in dirty_keys:
+            if key not in self.segmentation_volumes:
+                continue
+            self.switch_segmentation(key)
+            self.save_current_segmentation()
+            if self.segmentation_dirty.get(key, False):
+                if original_key in self.segmentation_volumes:
+                    self.switch_segmentation(original_key)
+                return False
+        if original_key in self.segmentation_volumes:
+            self.switch_segmentation(original_key)
+        return True
+
+    def confirm_switch_exam_with_unsaved_changes(self, next_exam_label=None):
+        if not self.has_unsaved_segmentations():
+            return True
+        message = "There are unsaved segmentation changes in the current exam."
+        if next_exam_label:
+            message += f" Save them before loading '{next_exam_label}'?"
+        else:
+            message += " Save them before switching exams?"
+        choice = self.prompt_save_discard_or_cancel(title="Unsaved Changes", message=message)
+        if choice == "cancel":
+            return False
+        if choice == "discard":
+            return True
+        return self.save_dirty_segmentations_interactive()
+
     def confirm_discard_unsaved_segmentations(self, title="Unsaved Changes", message=None):
         if not self.has_unsaved_segmentations():
             return True
@@ -390,6 +449,263 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             message = "There are unsaved segmentation changes in the current environment. Clear the environment and discard those changes?"
         reply = QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return reply == QMessageBox.Yes
+
+    def initialize_batch_navigation(self):
+        if not getattr(self, 'batch_discovery_result', None):
+            return
+        if getattr(self, 'batch_dock', None) is None:
+            self.batch_dock = QDockWidget("Batch Exams", self)
+            self.batch_dock.setObjectName("Batch Exams")
+            self.batch_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            self.batch_status_label = QLabel("Select an exam and click Load.")
+            self.batch_status_label.setWordWrap(True)
+            layout.addWidget(self.batch_status_label)
+
+            self.batch_tree = QTreeWidget()
+            self.batch_tree.setHeaderHidden(True)
+            self.batch_tree.itemSelectionChanged.connect(self.update_batch_selection_label)
+            self.batch_tree.itemDoubleClicked.connect(lambda *_args: self.load_selected_batch_exam())
+            layout.addWidget(self.batch_tree)
+
+            button_row = QHBoxLayout()
+            self.batch_load_button = QPushButton("Load Selected Exam")
+            self.batch_load_button.clicked.connect(self.load_selected_batch_exam)
+            button_row.addWidget(self.batch_load_button)
+            refresh_btn = QPushButton("Refresh List")
+            refresh_btn.clicked.connect(self.populate_batch_exam_tree)
+            button_row.addWidget(refresh_btn)
+            layout.addLayout(button_row)
+
+            self.batch_dock.setWidget(container)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.batch_dock)
+        self.populate_batch_exam_tree()
+
+    def get_batch_visible_exams(self):
+        result = getattr(self, 'batch_discovery_result', None)
+        selection = getattr(self, 'batch_launch_selection', None)
+        if result is None or selection is None:
+            return []
+        suffix = (selection.selected_suffix or '').strip()
+        if not suffix:
+            return []
+        selected_series = list(selection.selected_series_types or [])
+        require_all = bool(selection.require_all_selected_series)
+        exams = []
+        for exam in result.exams:
+            if suffix not in exam.available_suffixes:
+                continue
+            if require_all and selected_series:
+                available = set(exam.available_series_types_by_suffix.get(suffix, []))
+                if not all(series in available for series in selected_series):
+                    continue
+            exams.append(exam)
+        exams.sort(key=lambda exam: (exam.patient_id.lower(), exam.exam_id.lower(), exam.exam_dir.lower()))
+        return exams
+
+    def populate_batch_exam_tree(self):
+        if getattr(self, 'batch_tree', None) is None:
+            return
+        self.batch_tree.clear()
+        exams = self.get_batch_visible_exams()
+        root_dir = ''
+        if getattr(self, 'batch_discovery_result', None) is not None:
+            root_dir = getattr(self.batch_discovery_result.settings, 'root_dir', '') or ''
+        by_patient = {}
+        for exam in exams:
+            patient_item = by_patient.get(exam.patient_id)
+            if patient_item is None:
+                patient_item = QTreeWidgetItem([exam.patient_id])
+                patient_item.setData(0, Qt.UserRole, None)
+                by_patient[exam.patient_id] = patient_item
+                self.batch_tree.addTopLevelItem(patient_item)
+            rel_path = exam.exam_dir
+            if root_dir:
+                try:
+                    rel_path = os.path.relpath(exam.exam_dir, root_dir)
+                except Exception:
+                    rel_path = exam.exam_dir
+            suffix = (self.batch_launch_selection.selected_suffix or '').strip() if getattr(self, 'batch_launch_selection', None) else ''
+            available_series = exam.available_series_types_by_suffix.get(suffix, []) if suffix else []
+            child = QTreeWidgetItem([exam.exam_id])
+            child.setToolTip(0, f"{rel_path}\n{exam.exam_dir}\nSeries: {', '.join(available_series) if available_series else 'none'}")
+            child.setData(0, Qt.UserRole, exam.exam_dir)
+            patient_item.addChild(child)
+            patient_item.setExpanded(True)
+        self.batch_tree.expandAll()
+        self.update_batch_selection_label()
+        if getattr(self, 'batch_load_button', None) is not None:
+            self.batch_load_button.setEnabled(bool(exams))
+
+    def get_selected_batch_exam(self):
+        if getattr(self, 'batch_tree', None) is None:
+            return None
+        item = self.batch_tree.currentItem()
+        if item is None:
+            return None
+        exam_dir = item.data(0, Qt.UserRole)
+        if not exam_dir:
+            return None
+        result = getattr(self, 'batch_discovery_result', None)
+        if result is None:
+            return None
+        for exam in result.exams:
+            if exam.exam_dir == exam_dir:
+                return exam
+        return None
+
+    def update_batch_selection_label(self):
+        if getattr(self, 'batch_status_label', None) is None:
+            return
+        exam = self.get_selected_batch_exam()
+        if exam is None:
+            self.batch_status_label.setText("Select an exam and click Load.")
+            return
+        selection = getattr(self, 'batch_launch_selection', None)
+        suffix = (selection.selected_suffix or '').strip() if selection else ''
+        selected_series = list(selection.selected_series_types or []) if selection else []
+        available = exam.available_series_types_by_suffix.get(suffix, []) if suffix else []
+        planned = [series for series in selected_series if series in available] if selected_series else list(available)
+        self.batch_status_label.setText(
+            f"Selected exam: {exam.exam_id}\n"
+            f"Suffix: {suffix or 'none'}\n"
+            f"Series to load: {', '.join(planned) if planned else 'none'}"
+        )
+
+    def get_batch_exam_load_plan(self, exam):
+        selection = getattr(self, 'batch_launch_selection', None)
+        suffix = (selection.selected_suffix or '').strip() if selection else ''
+        selected_series = list(selection.selected_series_types or []) if selection else []
+        preferred_group = exam.preferred_group_by_suffix.get(suffix)
+        series_files = []
+        for sf in exam.series_files:
+            if sf.shared_suffix != suffix:
+                continue
+            if preferred_group and sf.compatible_group_key != preferred_group:
+                continue
+            if selected_series and sf.series_type not in selected_series:
+                continue
+            series_files.append(sf)
+        if selected_series:
+            order = {name: idx for idx, name in enumerate(selected_series)}
+            series_files.sort(key=lambda sf: (order.get(sf.series_type, len(order)), sf.filename.lower()))
+        else:
+            series_files.sort(key=lambda sf: (sf.series_type.lower(), sf.filename.lower()))
+        volume_paths = [sf.path for sf in series_files]
+
+        replacement_suffix = (selection.replacement_segmentation_suffix or '').strip() if selection else ''
+        segmentation_paths = []
+        # Always load the preferred existing segmentation when one is available.
+        # If a replacement suffix is requested, the loaded segmentation will be
+        # copied/renamed into the replacement output name rather than skipped.
+        if exam.preferred_segmentation_path:
+            segmentation_paths = [exam.preferred_segmentation_path]
+
+        return {
+            'volume_paths': volume_paths,
+            'roi_mask_path': exam.brainmask_path,
+            'segmentation_paths': segmentation_paths,
+            'replacement_segmentation_suffix': replacement_suffix,
+        }
+
+    def create_batch_replacement_segmentation(self, exam, replacement_suffix, source_segmentation_path=None):
+        replacement_suffix = (replacement_suffix or '').strip()
+        if not replacement_suffix:
+            return
+        if replacement_suffix.startswith('_'):
+            seg_name = f"{exam.exam_id}{replacement_suffix}"
+        else:
+            seg_name = f"{exam.exam_id}_{replacement_suffix}"
+        if seg_name in self.segmentation_volumes:
+            self.switch_segmentation(seg_name)
+            return
+
+        source_key = os.path.basename(source_segmentation_path) if source_segmentation_path else None
+        if source_key and source_key in self.segmentation_volumes:
+            # In batch mode, a replacement suffix should preserve the loaded segmentation
+            # contents and simply prepare a new output-named copy for editing/saving.
+            self.segmentation_volumes[seg_name] = np.array(self.segmentation_volumes[source_key], copy=True)
+            self.segmentation_names[seg_name] = dict(self.segmentation_names.get(source_key, {}))
+            self.segmentation_dirty[seg_name] = True
+            self.segmentation_combo.addItem(seg_name)
+            self.switch_segmentation(seg_name)
+
+            # Remove the source segmentation from the viewer so the replacement truly
+            # acts like a rename rather than leaving a duplicate loaded entry around.
+            if source_key != seg_name:
+                self.segmentation_volumes.pop(source_key, None)
+                self.segmentation_names.pop(source_key, None)
+                self.segmentation_dirty.pop(source_key, None)
+                idx = self.segmentation_combo.findText(source_key)
+                if idx >= 0:
+                    self.segmentation_combo.removeItem(idx)
+            self.segmentation_paths = []
+            return
+
+        self.create_new_segmentation(seg_name)
+        self.mark_segmentation_dirty(seg_name, True)
+
+    def load_selected_batch_exam(self):
+        exam = self.get_selected_batch_exam()
+        if exam is None:
+            QMessageBox.information(self, "Batch Exams", "Please select an exam to load.")
+            return
+        if not self.confirm_switch_exam_with_unsaved_changes(next_exam_label=exam.exam_id):
+            return
+        plan = self.get_batch_exam_load_plan(exam)
+        volume_paths = plan.get('volume_paths', [])
+        if not volume_paths:
+            QMessageBox.warning(self, "Batch Exams", f"No compatible series volumes were found to load for '{exam.exam_id}'.")
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.clear_loaded_exam()
+            self.batch_current_exam = exam
+            self.file_name = os.path.basename(volume_paths[0]) if volume_paths else exam.exam_id
+
+            # Preserve the first loaded batch volume as the active viewing volume.
+            # load_volume() normally switches to each newly loaded volume when
+            # initial_load is False, which would otherwise leave the last series
+            # selected after a batch exam load.
+            previous_initial_load = self.initial_load
+            self.initial_load = True
+            try:
+                for volume_path in volume_paths:
+                    self.load_volume(volume_path)
+            finally:
+                self.initial_load = previous_initial_load
+            if volume_paths:
+                first_volume_name = os.path.basename(volume_paths[0])
+                if first_volume_name in self.mri_volumes:
+                    self.switch_volume(first_volume_name)
+
+            roi_mask_path = plan.get('roi_mask_path')
+            if roi_mask_path:
+                self.load_roi(roi_mask_path)
+            segmentation_paths = plan.get('segmentation_paths', [])
+            if segmentation_paths:
+                self.load_segmentation(segmentation_paths)
+            replacement_suffix = plan.get('replacement_segmentation_suffix', '')
+            if replacement_suffix:
+                source_segmentation_path = segmentation_paths[0] if segmentation_paths else None
+                self.create_batch_replacement_segmentation(exam, replacement_suffix, source_segmentation_path=source_segmentation_path)
+            if self.data is not None:
+                self.display_all_slices()
+                self.update_visualization(reset_volume=True)
+                self.fit_views_to_contents()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if getattr(self, 'batch_status_label', None) is not None:
+            loaded_series = [os.path.basename(path) for path in volume_paths]
+            self.batch_status_label.setText(
+                f"Loaded exam: {exam.exam_id}\n"
+                f"Volumes: {', '.join(loaded_series)}\n"
+                f"ROI: {os.path.basename(plan.get('roi_mask_path')) if plan.get('roi_mask_path') else 'none'}"
+            )
 
     def clear_environment(self):
         if not self.confirm_discard_unsaved_segmentations(title="Clear Environment"):

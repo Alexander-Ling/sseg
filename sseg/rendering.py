@@ -19,6 +19,40 @@ from .dialogs import ParameterDialog
 
 
 class RenderingMixin:
+
+    def build_foreground_mask(self, data):
+            mask = np.abs(data) > 1e-3
+            if np.any(mask):
+                try:
+                    mask = binary_fill_holes(mask)
+                except Exception:
+                    pass
+            return mask
+
+    def compute_auto_opacity_transfer_function(self, data):
+            mask = self.build_foreground_mask(data)
+            foreground = data[mask] if np.any(mask) else data[np.isfinite(data)]
+            if foreground.size == 0:
+                return np.zeros(256, dtype=float)
+
+            levels = np.linspace(float(np.min(data)), float(np.max(data)), 256)
+            low = float(np.percentile(foreground, 55))
+            high = float(np.percentile(foreground, 99.5))
+            if not np.isfinite(low):
+                low = float(np.min(foreground))
+            if not np.isfinite(high):
+                high = float(np.max(foreground))
+
+            if high <= low:
+                high = low + max(abs(low) * 0.05, 1e-3)
+
+            t = (levels - low) / (high - low)
+            t = np.clip(t, 0.0, 1.0)
+            # Keep the default auto rendering fairly conservative so normalized scans
+            # do not appear as a fully opaque black block.
+            opacities = 0.35 * (t ** 2.2)
+            return opacities
+
     def display_placeholder_views(self, message="No exam loaded"):
             for orientation, view in self.views.items():
                 scene = QGraphicsScene()
@@ -47,7 +81,7 @@ class RenderingMixin:
             vtk_data.SetDimensions(data.shape)
             #vtk_data.SetSpacing(voxel_dims)
 
-            #Normalize data if it needs to be normalized
+            # Normalize data if it needs to be normalized.
             if np.isclose(self.global_min, 0, atol=1e-3):
                 data = self.normalize_data(data)
 
@@ -62,7 +96,13 @@ class RenderingMixin:
             # Clear the existing plotter data and add the new volume
             self.plotter_3d.clear()
 
-            opacities = self.biquadratic(data, self.steepness, self.exponent, self.opacity_multiplier)
+            # Auto 3D opacity is currently deprecated; keep the fallback path
+            # available for backwards compatibility, but default to manual.
+            if getattr(self, "auto_3d_opacity", False):
+                opacities = self.compute_auto_opacity_transfer_function(data)
+            else:
+                opacities = self.biquadratic(data, self.steepness, self.exponent, self.opacity_multiplier)
+
             if self.new_camera:
                 self.plotter_3d.add_volume(grid, mapper="gpu", cmap="gray", opacity=opacities, show_scalar_bar=False)
                 self.new_camera = False
