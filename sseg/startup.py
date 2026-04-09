@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFileDialog, QListWidget, QListWidgetItem, QMessageBox, QWidget, QApplication,
     QFormLayout, QGroupBox, QTabWidget, QPlainTextEdit, QTableWidget,
-    QTableWidgetItem, QHeaderView, QComboBox, QProgressDialog
+    QTableWidgetItem, QHeaderView, QComboBox, QProgressDialog, QScrollArea
 )
 
 from .batch_discovery import (
@@ -98,7 +98,7 @@ class BatchDiscoveryTab(QWidget):
         self.series_list = QListWidget()
         self.series_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self.series_list.itemSelectionChanged.connect(self.on_series_selection_changed)
-        self.series_list.setMinimumHeight(110)
+        self.series_list.setMinimumHeight(90)
         planning_form.addRow('Series types to load:', self.series_list)
         self.require_all_checkbox = QCheckBox('Only display exams that contain all selected series')
         self.require_all_checkbox.toggled.connect(self.refresh_results_table)
@@ -114,6 +114,7 @@ class BatchDiscoveryTab(QWidget):
         self.summary_label = QLabel('No discovery has been run yet.')
         results_layout.addWidget(self.summary_label)
         self.results_table = QTableWidget(0, 9)
+        self.results_table.setMinimumHeight(180)
         self.results_table.setHorizontalHeaderLabels([
             'Patient', 'Exam', 'Exam Directory', 'Series Volumes', 'Shared Suffixes',
             'Series Types', 'Brainmask', 'Segmentation', 'Subdirs'
@@ -390,16 +391,28 @@ class StartupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('sseg startup')
-        self.resize(980, 780)
+        self.setSizeGripEnabled(True)
         self._launch_mode = 'manual'
 
         root = QVBoxLayout(self)
+        # Wrap the startup UI in a scroll area so the full dialog remains reachable
+        # on laptops or other small displays, even when the layout's preferred size
+        # is larger than the available screen geometry.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        root.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+        content_layout = QVBoxLayout(content)
+
         intro = QLabel(
             'Start a manual session, or use batch discovery to find astril-style patient/exam folders '
             'and launch the viewer in empty mode with discovery data attached.'
         )
         intro.setWordWrap(True)
-        root.addWidget(intro)
+        content_layout.addWidget(intro)
 
         self.tabs = QTabWidget()
         self.manual_tab = QWidget()
@@ -407,7 +420,7 @@ class StartupDialog(QDialog):
         self.tabs.addTab(self.manual_tab, 'Manual Session')
         self.tabs.addTab(self.batch_tab, 'Batch Discovery')
         self.tabs.currentChanged.connect(self._update_launch_button_text)
-        root.addWidget(self.tabs)
+        content_layout.addWidget(self.tabs)
 
         self._build_manual_tab()
 
@@ -420,8 +433,24 @@ class StartupDialog(QDialog):
         self.launch_button.clicked.connect(self.validate_and_accept)
         self.launch_button.setDefault(True)
         buttons.addWidget(self.launch_button)
-        root.addLayout(buttons)
+        content_layout.addLayout(buttons)
         self._update_launch_button_text()
+        self._resize_for_screen()
+
+    def _resize_for_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(980, 780)
+            return
+
+        available = screen.availableGeometry()
+        width = min(980, max(720, available.width() - 80))
+        height = min(780, max(520, available.height() - 80))
+        self.resize(width, height)
+
+        # Keep the dialog minimum size modest so users can shrink it further
+        # if they want to while relying on scrollbars for the overflow content.
+        self.setMinimumSize(min(520, width), min(420, height))
 
     def _build_manual_tab(self) -> None:
         root = QVBoxLayout(self.manual_tab)

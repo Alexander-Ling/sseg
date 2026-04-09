@@ -1,0 +1,9 @@
+numpy
+scipy
+matplotlib
+nibabel
+pynrrd
+pyvista
+pyvistaqt
+vtk
+PyQt5
