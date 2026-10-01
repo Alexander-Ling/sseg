@@ -13,6 +13,7 @@ DEFAULT_SEGMENTATION_SUFFIXES = [
     "_tumor-segmentation.nii.gz", "_tumor-segmentation.nii", "_tumor-segmentation.nrrd",
     "_GBM-seg.nii.gz", "_GBM-seg.nii", "_GBM-seg.nrrd",
 ]
+DEFAULT_VOLUME_SUFFIXES = ["_brain-norm.nii.gz"]
 
 
 @dataclass
@@ -52,6 +53,9 @@ class BatchDiscoverySettings:
     brainmask_suffixes: list[str] = field(default_factory=lambda: list(DEFAULT_BRAINMASK_SUFFIXES))
     segmentation_suffixes: list[str] = field(default_factory=lambda: list(DEFAULT_SEGMENTATION_SUFFIXES))
     verify_scan_compatibility: bool = False
+    # Full filename endings (including extension) that identify displayable MRI volumes.
+    # The text before the suffix, after its last '_', is the series type.
+    volume_suffixes: list[str] = field(default_factory=lambda: list(DEFAULT_VOLUME_SUFFIXES))
 
 
 @dataclass
@@ -74,7 +78,8 @@ class BatchDiscoveryResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BatchDiscoveryResult":
-        settings = BatchDiscoverySettings(**data.get("settings", {}))
+        known = BatchDiscoverySettings.__dataclass_fields__
+        settings = BatchDiscoverySettings(**{k: v for k, v in data.get("settings", {}).items() if k in known})
         exams = []
         for item in data.get("exams", []):
             item = dict(item)

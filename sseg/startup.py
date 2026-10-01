@@ -19,7 +19,8 @@ from .batch_discovery import (
     discover_exams,
     exam_has_all_selected_series,
     get_available_series_types_for_suffix,
-    get_common_suffixes,
+    count_exams_with_suffix,
+    get_detected_suffixes,
 )
 from .batch_io import load_batch_discovery, save_batch_discovery
 from .batch_models import (
@@ -28,6 +29,7 @@ from .batch_models import (
     BatchLaunchSelection,
     DEFAULT_BRAINMASK_SUFFIXES,
     DEFAULT_SEGMENTATION_SUFFIXES,
+    DEFAULT_VOLUME_SUFFIXES,
     DEFAULT_IMAGE_EXTENSIONS,
 )
 
@@ -53,7 +55,7 @@ class BatchDiscoveryTab(QWidget):
             'Scan recursively for astril-style exam folders. Exam folders are expected to be named '
             '{patient_id}_{timepoint}_{exam_id}, to live directly under the patient folder, and to '
             'contain top-level MRI series volumes that start with the patient id. This tab also lets '
-            'you choose a shared suffix and a set of series types for the next batch step.'
+            'you choose a volume type and a set of series types for the next batch step.'
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -84,6 +86,13 @@ class BatchDiscoveryTab(QWidget):
         self.seg_suffix_edit.setPlaceholderText('One segmentation suffix per line')
         self.seg_suffix_edit.setFixedHeight(90)
         adv_form.addRow('Segmentation suffixes:', self.seg_suffix_edit)
+        self.volume_suffix_edit = QPlainTextEdit('\n'.join(DEFAULT_VOLUME_SUFFIXES))
+        self.volume_suffix_edit.setPlaceholderText(
+            'One volume suffix per line, including extension, e.g. _brain-norm.nii.gz.\n'
+            'The text before the suffix, after its last "_", is the series type (T1c, FLAIR, ...).'
+        )
+        self.volume_suffix_edit.setFixedHeight(70)
+        adv_form.addRow('Volume suffixes:', self.volume_suffix_edit)
         self.verify_compat_checkbox = QCheckBox('Verify Scan Compatibility (slower)')
         self.verify_compat_checkbox.setChecked(False)
         adv_form.addRow('', self.verify_compat_checkbox)
@@ -94,7 +103,7 @@ class BatchDiscoveryTab(QWidget):
         self.suffix_combo = QComboBox()
         self.suffix_combo.setEditable(False)
         self.suffix_combo.currentTextChanged.connect(self.on_suffix_changed)
-        planning_form.addRow('Selected shared suffix:', self.suffix_combo)
+        planning_form.addRow('Selected volume type:', self.suffix_combo)
         self.series_list = QListWidget()
         self.series_list.setSelectionMode(QAbstractItemView.MultiSelection)
         self.series_list.itemSelectionChanged.connect(self.on_series_selection_changed)
@@ -116,7 +125,7 @@ class BatchDiscoveryTab(QWidget):
         self.results_table = QTableWidget(0, 9)
         self.results_table.setMinimumHeight(180)
         self.results_table.setHorizontalHeaderLabels([
-            'Patient', 'Exam', 'Exam Directory', 'Series Volumes', 'Shared Suffixes',
+            'Patient', 'Exam', 'Exam Directory', 'Series Volumes', 'Volume Types',
             'Series Types', 'Brainmask', 'Segmentation', 'Subdirs'
         ])
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -162,6 +171,7 @@ class BatchDiscoveryTab(QWidget):
             brainmask_suffixes=brainmask_suffixes,
             segmentation_suffixes=segmentation_suffixes,
             verify_scan_compatibility=bool(self.verify_compat_checkbox.isChecked()),
+            volume_suffixes=self._nonempty_lines(self.volume_suffix_edit.toPlainText()) or list(DEFAULT_VOLUME_SUFFIXES),
         )
 
     def scan_directory(self) -> None:
@@ -207,14 +217,13 @@ class BatchDiscoveryTab(QWidget):
             self.new_seg_suffix_edit.setText('')
             return
         sel = self.discovery_result.launch_selection
-        common_suffixes = get_common_suffixes(self.discovery_result)
-        if common_suffixes and not sel.selected_suffix:
-            sel.selected_suffix = common_suffixes[0]
+        detected_suffixes = get_detected_suffixes(self.discovery_result)
+        if sel.selected_suffix not in detected_suffixes:
+            sel.selected_suffix = detected_suffixes[0] if detected_suffixes else None
 
         self.suffix_combo.blockSignals(True)
         self.suffix_combo.clear()
-        self.suffix_combo.addItem('')
-        for suffix in common_suffixes:
+        for suffix in detected_suffixes:
             self.suffix_combo.addItem(suffix)
         current_idx = self.suffix_combo.findText(sel.selected_suffix or '')
         if current_idx < 0 and (sel.selected_suffix or '').strip():
@@ -274,6 +283,7 @@ class BatchDiscoveryTab(QWidget):
         self.brainmask_edit.setPlainText('\n'.join(result.settings.brainmask_suffixes))
         self.seg_suffix_edit.setPlainText('\n'.join(result.settings.segmentation_suffixes))
         self.verify_compat_checkbox.setChecked(bool(getattr(result.settings, 'verify_scan_compatibility', False)))
+        self.volume_suffix_edit.setPlainText('\n'.join(result.settings.volume_suffixes))
 
         # Re-analyze in case settings or persisted content changed.
         for exam in result.exams:
@@ -296,6 +306,8 @@ class BatchDiscoveryTab(QWidget):
 
         rows = []
         for exam in result.exams:
+            if suffix and suffix not in exam.available_suffixes:
+                continue
             if require_all and suffix and not exam_has_all_selected_series(exam, suffix, selected_series):
                 continue
             suffixes_display = ', '.join(exam.available_suffixes)
@@ -338,10 +350,10 @@ class BatchDiscoveryTab(QWidget):
         exam_count = len(result.exams)
         visible_count = len(rows)
         skipped_count = len(result.skipped_dirs)
-        common_suffixes = get_common_suffixes(result)
+        detected = [f'{sfx} ({count_exams_with_suffix(result, sfx)} exams)' for sfx in get_detected_suffixes(result)]
         self.summary_label.setText(
             f'Discovered {exam_count} exam folder(s), showing {visible_count}. '
-            f'Checked {exam_count + skipped_count} directorie(s). Common suffixes: {", ".join(common_suffixes) if common_suffixes else "none"}.'
+            f'Checked {exam_count + skipped_count} directorie(s). Volume types: {", ".join(detected) if detected else "none"}.'
         )
         self.results_table.resizeRowsToContents()
 
@@ -579,7 +591,7 @@ class StartupDialog(QDialog):
                 QMessageBox.warning(self, 'Batch Discovery', 'Please scan a directory or load a discovery JSON first.')
                 return
             if not (self.batch_tab.discovery_result.launch_selection.selected_suffix or '').strip():
-                QMessageBox.warning(self, 'Batch Discovery', 'Please choose a shared suffix before beginning segmenting.')
+                QMessageBox.warning(self, 'Batch Discovery', 'Please choose a volume type before beginning segmenting.')
                 return
             self._launch_mode = 'batch'
         else:

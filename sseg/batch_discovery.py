@@ -44,12 +44,24 @@ def is_obvious_nonseries_file(filename: str, settings: BatchDiscoverySettings) -
     return any(lower.endswith(sfx.lower()) for sfx in suffixes if sfx)
 
 
-def _infer_series_type_and_suffix(filename: str) -> tuple[str, str]:
-    stem = strip_known_image_extension(filename)
-    parts = stem.split('_')
-    series_type = parts[2] if len(parts) >= 4 else (parts[-2] if len(parts) >= 2 else stem)
-    shared_suffix = parts[-1] if len(parts) >= 2 else ''
-    return series_type, shared_suffix
+def match_volume_suffix(filename: str, volume_suffixes: list[str]) -> Optional[str]:
+    """Return the configured volume suffix that ends the filename (longest wins), else None."""
+    lower = filename.lower()
+    matches = [sfx for sfx in volume_suffixes if sfx and lower.endswith(sfx.lower())]
+    return max(matches, key=len) if matches else None
+
+
+def _infer_series_type_and_suffix(filename: str, volume_suffixes: list[str]) -> tuple[str, str]:
+    """Split a filename into (series type, volume suffix).
+
+    002_d-12_T1c_brain-norm.nii.gz with suffix '_brain-norm.nii.gz' -> ('T1c', '_brain-norm.nii.gz').
+    Returns ('', '') when no configured suffix matches.
+    """
+    suffix = match_volume_suffix(filename, volume_suffixes)
+    if suffix is None:
+        return '', ''
+    base = filename[:len(filename) - len(suffix)].rstrip('_')
+    return base.split('_')[-1], suffix
 
 
 def _round_float_list(values, ndigits=5):
@@ -113,9 +125,13 @@ def classify_directory_as_exam(path: Path, settings: BatchDiscoverySettings):
         return False, 'no supported top-level image files', None
 
     excluded = [p for p in image_files if is_obvious_nonseries_file(p.name, settings)]
-    series = [p for p in image_files if p not in excluded and p.name.startswith(patient_id)]
+    series = [
+        p for p in image_files
+        if p not in excluded and p.name.startswith(patient_id)
+        and match_volume_suffix(p.name, settings.volume_suffixes)
+    ]
     if not series:
-        return False, 'no candidate series files after excluding obvious non-series files', None
+        return False, 'no image files ending in a configured volume suffix', None
 
     subdirs = sorted([p.name for p in path.iterdir() if p.is_dir()])
     exam = DiscoveredExam(
@@ -147,7 +163,7 @@ def analyze_exam(exam: DiscoveredExam, settings: Optional[BatchDiscoverySettings
 
     for path_str in sorted(exam.series_volume_paths):
         path = Path(path_str)
-        series_type, shared_suffix = _infer_series_type_and_suffix(path.name)
+        series_type, shared_suffix = _infer_series_type_and_suffix(path.name, settings.volume_suffixes)
         suffix_series_all[shared_suffix].add(series_type)
         if verify:
             try:
@@ -261,21 +277,22 @@ def discover_exams(root_dir: str, settings: BatchDiscoverySettings, progress_cal
             result.skipped_dirs.append({'dir': str(path), 'reason': reason})
 
     result.exams.sort(key=lambda e: (e.patient_id.lower(), e.exam_id.lower(), e.exam_dir.lower()))
-    common_suffixes = get_common_suffixes(result)
-    if common_suffixes and not result.launch_selection.selected_suffix:
-        result.launch_selection.selected_suffix = common_suffixes[0]
+    detected = get_detected_suffixes(result)
+    if detected and not result.launch_selection.selected_suffix:
+        result.launch_selection.selected_suffix = detected[0]
     if progress_callback is not None:
         progress_callback(total_dirs, total_dirs, 'Scan complete')
     return result
-def get_common_suffixes(result: BatchDiscoveryResult) -> list[str]:
-    common: Optional[set[str]] = None
-    for exam in result.exams:
-        suffixes = set(exam.available_suffixes)
-        if common is None:
-            common = suffixes
-        else:
-            common &= suffixes
-    return sorted(common) if common else []
+
+
+def get_detected_suffixes(result: BatchDiscoveryResult) -> list[str]:
+    """Configured volume suffixes found in at least one exam, in settings order."""
+    found = {sfx for exam in result.exams for sfx in exam.available_suffixes}
+    return [sfx for sfx in result.settings.volume_suffixes if sfx in found]
+
+
+def count_exams_with_suffix(result: BatchDiscoveryResult, suffix: str) -> int:
+    return sum(1 for exam in result.exams if suffix in exam.available_suffixes)
 
 
 def get_available_series_types_for_suffix(result: BatchDiscoveryResult, suffix: str) -> list[str]:
