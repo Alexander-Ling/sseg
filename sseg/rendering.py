@@ -278,18 +278,15 @@ class RenderingMixin:
 
     def remove_mouse_highlights(self):
             if 'brush_circle' in self.highlight_actors:
-                current_scene = None
-                if getattr(self, 'current_view', None) is not None:
-                    try:
-                        current_scene = self.current_view.scene()
-                    except Exception:
-                        current_scene = None
-                brush_item = self.highlight_actors['brush_circle']
-                brush_scene = brush_item.scene() if brush_item is not None else None
-                target_scene = current_scene if current_scene is not None else brush_scene
-                if target_scene is not None and brush_item in target_scene.items():
-                    target_scene.removeItem(brush_item)
-                del self.highlight_actors['brush_circle']
+                # Remove the circle from whichever scene actually holds it. The mouse may already
+                # be in a different view than the one the circle was last drawn in.
+                brush_item = self.highlight_actors.pop('brush_circle')
+                try:
+                    brush_scene = brush_item.scene()
+                    if brush_scene is not None:
+                        brush_scene.removeItem(brush_item)
+                except RuntimeError:
+                    pass  # underlying Qt item was already deleted (e.g. scene.clear())
 
             if 'mouse_hover' in self.highlight_actors:
                 self.plotter_3d.remove_actor(self.highlight_actors['mouse_hover'])

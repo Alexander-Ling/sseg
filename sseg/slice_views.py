@@ -150,6 +150,11 @@ class SliceViewMixin:
                             self.apply_2d_brush(self.coord)
                             return True
 
+            # Cursor left a view: no further MouseMove will arrive there, so clear the brush ring now.
+            elif event.type() == QEvent.Leave:
+                if any(v.viewport() is source for v in self.views.values()):
+                    self.remove_mouse_highlights()
+
             # Handling zoom and scroll
             elif event.type() == QEvent.Wheel:
                 modifiers = QApplication.keyboardModifiers()
