@@ -1,9 +1,11 @@
 """2D slice interaction and event-handling mixins for the sseg viewer."""
 
 import numpy as np
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, QTimer, Qt
 from PyQt5.QtGui import QColor, QCursor, QMouseEvent, QPen, QTransform
 from PyQt5.QtWidgets import QApplication, QGraphicsEllipseItem, QGraphicsPixmapItem
+
+from . import perf
 
 
 class SliceViewMixin:
@@ -20,62 +22,48 @@ class SliceViewMixin:
     def get_current_segmentation_slice_data(self, orientation):
             if self.current_segmentation is None:
                 return None
-            if not np.all(self.current_segmentation == 0):
-                if orientation == 'axial':
-                    return self.current_segmentation[:, :, self.axial_index]
-                elif orientation == 'coronal':
-                    return self.current_segmentation[:, self.coronal_index, :]
-                elif orientation == 'sagittal':
-                    return self.current_segmentation[self.sagittal_index, :, :]
+            if orientation == 'axial':
+                return self.current_segmentation[:, :, self.axial_index]
+            elif orientation == 'coronal':
+                return self.current_segmentation[:, self.coronal_index, :]
+            elif orientation == 'sagittal':
+                return self.current_segmentation[self.sagittal_index, :, :]
             return None
 
     def update_brush_circle(self, scene_pos, view):
             brush_size = self.brush_size_slider.value()  # Get the current brush size
             radius = brush_size / 2
 
-            # Check if 'brush_circle' is in highlight_actors
-            if 'brush_circle' in self.highlight_actors:
-                # Attempt to check if the item is still valid and in the correct scene
-                try:
-                    if self.highlight_actors['brush_circle'].scene() != view.scene():
-                        # If it belongs to a different scene, remove it safely
-                        try:
-                            self.highlight_actors['brush_circle'].scene().removeItem(self.highlight_actors['brush_circle'])
-                        except RuntimeError:
-                            # Handle cases where the item is already deleted
-                            pass
-                        del self.highlight_actors['brush_circle']
-
-                        # Create a new QGraphicsEllipseItem for the current view
-                        self.highlight_actors['brush_circle'] = QGraphicsEllipseItem()
-                        self.highlight_actors['brush_circle'].setPen(QPen(QColor("blue"), 2, Qt.SolidLine))
-                        view.scene().addItem(self.highlight_actors['brush_circle'])
-                        self.highlight_actors['brush_circle'].setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
-                        self.highlight_actors['brush_circle'].setVisible(True)
-                    else:
-                        # Update the existing brush_circle's position and size
-                        self.highlight_actors['brush_circle'].setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
-                        self.highlight_actors['brush_circle'].setVisible(True)
-                except RuntimeError:
-                    # Handle cases where the item is already deleted and recreate it
-                    self.highlight_actors['brush_circle'] = QGraphicsEllipseItem()
-                    self.highlight_actors['brush_circle'].setPen(QPen(QColor("blue"), 2, Qt.SolidLine))
-                    view.scene().addItem(self.highlight_actors['brush_circle'])
-                    self.highlight_actors['brush_circle'].setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
-                    self.highlight_actors['brush_circle'].setVisible(True)
-            else:
-                # Create a new QGraphicsEllipseItem since it does not exist
-                self.highlight_actors['brush_circle'] = QGraphicsEllipseItem()
-                self.highlight_actors['brush_circle'].setPen(QPen(QColor("blue"), 2, Qt.SolidLine))
-                view.scene().addItem(self.highlight_actors['brush_circle'])
-                self.highlight_actors['brush_circle'].setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
-                self.highlight_actors['brush_circle'].setVisible(True)
+            item = self.highlight_actors.get('brush_circle')
+            scene = view.scene()
+            try:
+                if item is not None and item.scene() is not scene:
+                    # The ring belongs to another view's scene: take it out of there and make a fresh one.
+                    if item.scene() is not None:
+                        item.scene().removeItem(item)
+                    item = None
+            except RuntimeError:
+                item = None  # underlying Qt item was already deleted (e.g. scene.clear())
+            if item is None:
+                item = QGraphicsEllipseItem()
+                item.setPen(QPen(QColor("blue"), 2, Qt.SolidLine))
+                scene.addItem(item)
+                self.highlight_actors['brush_circle'] = item
+            item.setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
+            item.setVisible(True)
 
     def eventFilter(self, source, event):
 
             # Handling mouse button press
             if event.type() == QEvent.MouseButtonPress:
                 if event.buttons() == Qt.RightButton:  # Use right mouse click for panning
+                    self.panning = True
+                    self.last_pan_point = event.pos()
+                    source.setCursor(QCursor(Qt.ClosedHandCursor))
+                    return True
+                elif (event.buttons() == Qt.LeftButton and self.current_segmentation_tool == "pan"
+                        and source in [self.view_axial.viewport(), self.view_coronal.viewport(), self.view_sagittal.viewport()]):
+                    # Pan tool: left-drag moves the image; nothing is ever written to the segmentation
                     self.panning = True
                     self.last_pan_point = event.pos()
                     source.setCursor(QCursor(Qt.ClosedHandCursor))
@@ -116,9 +104,12 @@ class SliceViewMixin:
 
             # Handling mouse button release
             elif event.type() == QEvent.MouseButtonRelease:
-                if event.button() == Qt.RightButton:
+                if event.button() == Qt.RightButton or (event.button() == Qt.LeftButton and self.current_segmentation_tool == "pan"):
                     self.panning = False
-                    source.unsetCursor()
+                    if self.current_segmentation_tool == "pan":
+                        source.setCursor(QCursor(Qt.OpenHandCursor))
+                    else:
+                        source.unsetCursor()
                     return True
                 elif event.button() == Qt.LeftButton and self.current_segmentation_tool == "2d_brush":
                     self.finalize_2d_brush_strokes()
@@ -185,7 +176,9 @@ class SliceViewMixin:
             #event.pos() is position relative to top left corner of view window. Changes as view window is resized.
             scene_pos = view.mapToScene(event.pos()) #Coordinates relative to static coordinate system. Plotted object remains in same location on these coordinates regardless of zoom, translation, etc.
             # Iterate through all items and find the QGraphicsPixmapItem
-            pixmap_item = next((item for item in view.scene().items() if isinstance(item, QGraphicsPixmapItem)), None)
+            pixmap_item = getattr(view, 'pixmap_item', None)
+            if pixmap_item is None or pixmap_item.scene() is not view.scene():
+                pixmap_item = next((item for item in view.scene().items() if isinstance(item, QGraphicsPixmapItem)), None)
             if pixmap_item:
                 # Convert the scene position directly to pixmap item coordinates
                 item_pos = pixmap_item.mapFromScene(scene_pos)
@@ -236,7 +229,9 @@ class SliceViewMixin:
                     elif orientation == 'sagittal':
                         self.coord = (self.sagittal_index, y, x)
                     self.highlight_voxel(self.coord, orientation)
-                    self.info_label.setText(f"{orientation.capitalize()} - Coordinates: {self.coord} Value: {self.pixel_value:.2f}")
+                    text = f"{orientation.capitalize()} - Coordinates: {self.coord} Value: {self.pixel_value:.2f}"
+                    if text != self.info_label.text():
+                        self.info_label.setText(text)
                 return True
 
     def zoom_view(self, view, factor, cursor_pos):
@@ -298,4 +293,28 @@ class SliceViewMixin:
             if any(self.plane_visibility.values()):
                 self.update_planes()
 
+            self._display_slice_throttled(orientation)
+
+    def _display_slice_throttled(self, orientation):
+            """Draw immediately, then at most once per ~16 ms; bursts of wheel events collapse to the latest slice."""
+            timers = self.__dict__.setdefault('_scroll_timers', {})
+            pending = self.__dict__.setdefault('_scroll_pending', set())
+            timer = timers.get(orientation)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(16)
+                timer.timeout.connect(lambda o=orientation: self._flush_pending_scroll(o))
+                timers[orientation] = timer
+            if timer.isActive():
+                pending.add(orientation)
+                return
             getattr(self, f"display_{orientation}_slice")()
+            timer.start()
+
+    def _flush_pending_scroll(self, orientation):
+            pending = self.__dict__.setdefault('_scroll_pending', set())
+            if orientation in pending:
+                pending.discard(orientation)
+                getattr(self, f"display_{orientation}_slice")()
+                self._scroll_timers[orientation].start()

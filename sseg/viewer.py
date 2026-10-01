@@ -29,13 +29,13 @@ from pyvistaqt import BackgroundPlotter
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QGridLayout, QWidget, QGraphicsView, QGraphicsScene, QMenu, QWidgetAction,
                              QMenuBar, QAction, QVBoxLayout, QHBoxLayout, QSlider, QLabel, QDialog, QPushButton, QGraphicsPixmapItem,
                              QComboBox, QToolBar, QMessageBox, QProgressDialog, QInputDialog, QLineEdit, QSpinBox, QGraphicsEllipseItem,
-                             QFileDialog, QDockWidget, QTreeWidget, QTreeWidgetItem)
+                             QFileDialog, QDockWidget, QTreeWidget, QTreeWidgetItem, QActionGroup)
 from PyQt5.QtGui import QImage, QPixmap, QMouseEvent, QCursor, QPen, QColor, QPainter, QIntValidator, QDoubleValidator, QTransform
 from scipy.ndimage import rotate, binary_dilation, binary_erosion
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import ListedColormap, Normalize
-from PyQt5.QtCore import Qt, QPoint, QEvent
+from PyQt5.QtCore import Qt, QPoint, QEvent, QSettings, QTimer
 from scipy.ndimage import binary_fill_holes
 from queue import Queue
 from functools import partial
@@ -43,6 +43,7 @@ from collections import deque
 
 from .dialogs import ParameterDialog, RotationDialog
 from .hotkeys import GlobalHotkeyFilter
+from .icons import make_hand_icon
 from .io_utils import (
     default_save_directory as compute_default_save_directory,
     determine_nrrd_space,
@@ -59,10 +60,6 @@ from .rendering import RenderingMixin
 from .segmentation_ops import SegmentationOpsMixin
 from .slice_views import SliceViewMixin
 
-# Force VTK to use hardware acceleration
-#os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"  # Ensure software rendering is disabled
-os.environ["VTK_USE_GPU"] = "0"
-#os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "i965"  # Use compatible drivers when needed
 
 class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindow):
     def __init__(self, volume_paths, segmentation_paths, segmentation_suffixes, suffix_to_replace, ROI_mask_path, parent=None):
@@ -79,13 +76,50 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
         # Initializing menu tool bar
         self.menu_bar = self.menuBar()
-        self.tools_menu = self.menu_bar.addMenu("Tools")
+        # Menus with checkable items stay open while items are toggled (click elsewhere or press Esc to close)
+        self.tools_menu = PersistentMenu("Tools", self, tear_off=False)
+        self.menu_bar.addMenu(self.tools_menu)
         #self.rotation_action = QAction("Rotate Slices", self) #Currently omitting Rotate Slices option since I haven't had time to ensure rotations are propagated to all volumes/segmentation volumes and are reversible upon saving.
         #self.rotation_action.triggered.connect(self.open_rotation_dialog)
         #self.tools_menu.addAction(self.rotation_action)
         self.parameter_action = QAction("Adjust 3D Opacity", self)
         self.parameter_action.triggered.connect(self.open_parameter_dialog)
         self.tools_menu.addAction(self.parameter_action)
+
+        # Performance options (remembered between sessions). The 3D hover marker is a single cached object and its renders are throttled,
+        # so it is on by default; "Show 3D view" off skips all 3D work.
+
+        settings = QSettings("sseg", "sseg")
+        self.show_3d_hover_marker = settings.value("show_3d_hover_marker", True, type=bool)
+        self.show_3d_view = settings.value("show_3d_view", True, type=bool)
+        self.hover_marker_action = QAction("3D hover marker", self, checkable=True, checked=self.show_3d_hover_marker)
+        self.hover_marker_action.toggled.connect(self.set_3d_hover_marker)
+        self.tools_menu.addAction(self.hover_marker_action)
+
+        # Display menu: choose which view windows are shown (and therefore rendered and interactive).
+        self.view_enabled = {'3d': self.show_3d_view, 'axial': True, 'coronal': True, 'sagittal': True}
+        self.display_menu = PersistentMenu("Display", self, tear_off=False)
+        self.menu_bar.addMenu(self.display_menu)
+        self.view_actions = {}
+        for key, label in (('3d', "3D view"), ('axial', "Axial view"), ('coronal', "Coronal view"), ('sagittal', "Sagittal view")):
+            action = QAction(label, self, checkable=True, checked=self.view_enabled[key])
+            action.toggled.connect(lambda checked, k=key: self.set_view_enabled(k, checked))
+            self.display_menu.addAction(action)
+            self.view_actions[key] = action
+        self.display_menu.addSeparator()
+        # "Fast" renders the 3D view from a 2x downsampled copy of the volume (8x fewer voxels); 2D views are unaffected.
+        self.quality_3d = settings.value("quality_3d", "full", type=str)
+        if self.quality_3d not in ("full", "fast"):
+            self.quality_3d = "full"
+        quality_menu = PersistentMenu("3D quality", self, tear_off=False)
+        self.tools_menu.addMenu(quality_menu)
+        self.quality_action_group = QActionGroup(self)
+        self.quality_action_group.setExclusive(True)
+        for mode, label in (("full", "Full resolution"), ("fast", "Fast (half resolution)")):
+            action = QAction(label, self, checkable=True, checked=(self.quality_3d == mode))
+            action.triggered.connect(lambda _checked, m=mode: self.set_3d_quality(m))
+            self.quality_action_group.addAction(action)
+            quality_menu.addAction(action)
         self.plane_visibility = {
             'axial': False,
             'coronal': False,
@@ -120,6 +154,9 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.view_axial = QGraphicsView()
         self.view_coronal = QGraphicsView()
         self.view_sagittal = QGraphicsView()
+        for _view in (self.view_axial, self.view_coronal, self.view_sagittal):
+            _view.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
+            _view.setOptimizationFlags(QGraphicsView.DontSavePainterState | QGraphicsView.DontAdjustForAntialiasing)
 
         self.views = {
             'axial': self.view_axial,
@@ -131,7 +168,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.widget = QWidget()
         self.layout = QGridLayout(self.widget)
         self.segmentation_tools = [
-            "3d_contour", "3d_patch_contour", "3d_contour_global", "2d_brush",
+            "pan", "3d_contour", "3d_patch_contour", "3d_contour_global", "2d_brush",
             "grow_borders", "remove_volume", "keep_volume_only",
             "change_volume_level", "fill_holes"
         ]
@@ -170,10 +207,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.roi_label = QLabel("ROI Loaded: None")
         self.layout.addWidget(self.roi_label, 0, 0, 1, 2)
         
-        self.layout.addWidget(self.plotter_3d.interactor, 1, 0)
-        self.layout.addWidget(self.view_axial, 1, 1)
-        self.layout.addWidget(self.view_coronal, 2, 0)
-        self.layout.addWidget(self.view_sagittal, 2, 1)
+        self.relayout_views()
 
         self.info_label = QLabel("Hover over image to see pixel info")
         self.layout.addWidget(self.info_label, 3, 0, 1, 2)
@@ -224,6 +258,11 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.master_canonical_voxel_dims = None
         self.master_canonical_shape = None
 
+        # Undo/redo and dirty-tracking state must exist before any volume or segmentation is loaded.
+        self.undo_stack = []
+        self.redo_stack = []
+        self.segmentation_dirty = {}
+
         self.initial_load = True
         if self.volume_paths:
             for path in self.volume_paths:
@@ -245,10 +284,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         if self.data is None:
             self.show_empty_state()
 
-        # Handle undo and redo operations
-        self.undo_stack = []
-        self.redo_stack = []
-        self.segmentation_dirty = {}
+        # Handle undo and redo operations (state is initialized before loading, see above)
         undo_action = QAction("Undo", self)
         undo_action.setShortcut("Ctrl+Z")
         undo_action.triggered.connect(self.undo)
@@ -450,6 +486,15 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         reply = QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return reply == QMessageBox.Yes
 
+    def show_batch_dock(self):
+        dock = getattr(self, 'batch_dock', None)
+        if dock is None:
+            return
+        dock.show()
+        dock.raise_()
+        if dock.isFloating():
+            dock.activateWindow()
+
     def initialize_batch_navigation(self):
         if not getattr(self, 'batch_discovery_result', None):
             return
@@ -481,7 +526,77 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
             self.batch_dock.setWidget(container)
             self.addDockWidget(Qt.LeftDockWidgetArea, self.batch_dock)
+
+            # Toolbar button and Display-menu entry to bring the exam list back if it was closed
+            self.batch_show_action = QAction("Exam List", self)
+            self.batch_show_action.setToolTip("Show the multi-patient exam selection window")
+            self.batch_show_action.triggered.connect(self.show_batch_dock)
+            self.toolbar.insertAction(self._pan_separator, self.batch_show_action)  # near the front so it never lands in the overflow menu
+            self.display_menu.addAction(self.batch_dock.toggleViewAction())
+            self.batch_dock.toggleViewAction().setText("Exam list")
         self.populate_batch_exam_tree()
+
+    def set_3d_hover_marker(self, enabled):
+        self.show_3d_hover_marker = bool(enabled)
+        QSettings("sseg", "sseg").setValue("show_3d_hover_marker", self.show_3d_hover_marker)
+        if not enabled:
+            self.hide_hover_markers()
+
+    def set_3d_quality(self, mode):
+        if mode == self.quality_3d:
+            return
+        self.quality_3d = mode
+        QSettings("sseg", "sseg").setValue("quality_3d", mode)
+        if self.data is not None and self.show_3d_view:
+            self.update_visualization(reset_volume=True)
+
+    def relayout_views(self):
+        """Place the enabled views in the grid so they fill the available space (4 -> 2x2, 3 -> 2 + 1 wide, 2 -> side by side)."""
+        widgets = [('3d', self.plotter_3d.interactor), ('axial', self.view_axial),
+                   ('coronal', self.view_coronal), ('sagittal', self.view_sagittal)]
+        for _key, widget in widgets:
+            self.layout.removeWidget(widget)
+        shown = [widget for key, widget in widgets if self.view_enabled[key]]
+        for key, widget in widgets:
+            if not self.view_enabled[key]:
+                widget.setVisible(False)
+        placements = {
+            1: [(1, 0, 2, 2)],
+            2: [(1, 0, 2, 1), (1, 1, 2, 1)],
+            3: [(1, 0, 1, 1), (1, 1, 1, 1), (2, 0, 1, 2)],
+            4: [(1, 0, 1, 1), (1, 1, 1, 1), (2, 0, 1, 1), (2, 1, 1, 1)],
+        }.get(len(shown), [])
+        for widget, (row, col, row_span, col_span) in zip(shown, placements):
+            self.layout.addWidget(widget, row, col, row_span, col_span)
+            widget.setVisible(True)
+        for row in (1, 2):
+            self.layout.setRowStretch(row, 1)
+        for col in (0, 1):
+            self.layout.setColumnStretch(col, 1)
+        QTimer.singleShot(0, self.fit_views_to_contents)
+
+    def set_view_enabled(self, key, enabled):
+        if not enabled and not any(v for k, v in self.view_enabled.items() if k != key):
+            # Keep at least one view on screen
+            self.view_actions[key].blockSignals(True)
+            self.view_actions[key].setChecked(True)
+            self.view_actions[key].blockSignals(False)
+            return
+        self.view_enabled[key] = bool(enabled)
+        if key == '3d':
+            self.set_3d_view_visible(enabled)
+            return
+        self.relayout_views()
+        if enabled and self.data is not None:
+            getattr(self, f"display_{key}_slice")()  # views skip drawing while disabled, so refresh on re-enable
+
+    def set_3d_view_visible(self, visible):
+        self.show_3d_view = bool(visible)
+        self.view_enabled['3d'] = self.show_3d_view
+        QSettings("sseg", "sseg").setValue("show_3d_view", self.show_3d_view)
+        self.relayout_views()
+        if self.show_3d_view and self.data is not None:
+            self.update_visualization(reset_volume=True)
 
     def get_batch_visible_exams(self):
         result = getattr(self, 'batch_discovery_result', None)
@@ -957,68 +1072,83 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
     # Code for managing undo/redo actions
 
-    def undo(self):
-        if self.undo_stack:
-            current_state = (self.current_segmentation_key, np.copy(self.current_segmentation))
-            # Get indices of all entries for the current key
-            current_key_indices = [index for index, state in enumerate(self.undo_stack) if state[0] == self.current_segmentation_key]
+    # Undo/redo store only the region an edit touched: entries are (segmentation key, bbox, voxel values of that region).
+    def _swap_region(self, stack_from, stack_to, empty_message, none_for_key_message, action_name):
+        if not stack_from:
+            QMessageBox.information(self, action_name, empty_message)
+            return
+        indices = [i for i, entry in enumerate(stack_from) if entry[0] == self.current_segmentation_key]
+        if not indices:
+            QMessageBox.information(self, action_name, none_for_key_message)
+            return
+        key, bbox, stored = stack_from.pop(indices[-1])
+        region = tuple(slice(lo, hi) for lo, hi in bbox)
+        seg = self.current_segmentation
+        if seg is None or seg[region].shape != stored.shape:
+            QMessageBox.warning(self, action_name, "This history entry no longer matches the loaded segmentation and was discarded.")
+            return
+        stack_to.append((key, bbox, np.copy(seg[region])))  # what the region holds now, for the opposite operation
+        seg[region] = stored
+        self.segmentation_volumes[self.current_segmentation_key] = seg
 
-            if len(current_key_indices) > 0:
-                # More than one state exists, pop the last one
-                index_to_remove = current_key_indices[-1]
-                previous_state = self.undo_stack.pop(index_to_remove)[1]  # Pop by index
-                self.redo_stack.append(current_state)  # Push current state to redo stack
-            else:
-                QMessageBox.information(self, "Undo", "No actions to undo for the current segmentation.")
-                return
-            
-            # Set the current segmentation to the previous state
-            self.segmentation_volumes[self.current_segmentation_key] = previous_state
-            self.current_segmentation = previous_state
-            
-            # Update the visualization and display
-            self.mark_segmentation_dirty(self.current_segmentation_key, True)
-            self.update_visualization(reset_volume=False)
-            self.display_all_slices()
-        else:
-            QMessageBox.information(self, "Undo", "No actions to undo.")
+        # Update the visualization and display
+        self.mark_segmentation_dirty(self.current_segmentation_key, True)
+        self.refresh_unique_levels()
+        self.update_level_menus_if_changed()
+        self.update_visualization(reset_volume=False, dirty_bbox=bbox)
+        self.display_all_slices()
+
+    def undo(self):
+        self._swap_region(self.undo_stack, self.redo_stack, "No actions to undo.",
+                          "No actions to undo for the current segmentation.", "Undo")
 
     def redo(self):
-        if self.redo_stack:
-            current_state = (self.current_segmentation_key, np.copy(self.current_segmentation))
-            # Get indices of all entries for the current key
-            current_key_indices = [index for index, state in enumerate(self.redo_stack) if state[0] == self.current_segmentation_key]
-
-            if len(current_key_indices) > 0:
-                # More than one state exists, pop the last one
-                index_to_remove = current_key_indices[-1]
-                previous_state = self.redo_stack.pop(index_to_remove)[1]  # Pop by index
-                self.undo_stack.append(current_state)  # Push current state to undo stack
-            else:
-                QMessageBox.information(self, "Redo", "No actions to redo for the current segmentation.")
-                return
-            
-            # Set the current segmentation to the previous state
-            self.segmentation_volumes[self.current_segmentation_key] = previous_state
-            self.current_segmentation = previous_state
-            
-            # Update the visualization and display
+        self._swap_region(self.redo_stack, self.undo_stack, "No actions to redo.",
+                          "No actions to redo for the current segmentation.", "Redo")
+        if self.current_segmentation_key:
             self.segmentation_combo.setCurrentText(self.current_segmentation_key)
-            self.mark_segmentation_dirty(self.current_segmentation_key, True)
-            self.update_visualization(reset_volume=False)
-            self.display_all_slices()
 
-        else:
-            QMessageBox.information(self, "Redo", "No actions to redo.")
-
-    def push_to_undo_stack(self):
-        # Push the current state of the segmentation to the stack
+    def push_to_undo_stack(self, bbox=None):
+        # Store the pre-edit values of the region about to change (the whole volume if no bbox is given)
         if self.current_segmentation is not None:
+            if bbox is None:
+                bbox = tuple((0, n) for n in self.current_segmentation.shape)
+            region = tuple(slice(lo, hi) for lo, hi in bbox)
+            # A new edit invalidates anything that could have been redone for this segmentation
+            self.redo_stack[:] = [e for e in self.redo_stack if e[0] != self.current_segmentation_key]
             # Check that undo stack isn't getting too big
             if len(self.undo_stack) >= 20:
-                self.undo_stack.pop(0) # Remove oldest undo stack state if there are 20 or more states in the stack
-            # Appending state to undo stack
-            self.undo_stack.append((self.current_segmentation_key, np.copy(self.current_segmentation))) # Use np.copy to ensure you're storing a snapshot, not a reference
+                self.undo_stack.pop(0)  # Remove oldest undo stack state if there are 20 or more states in the stack
+            # np.copy ensures we store a snapshot, not a view
+            self.undo_stack.append((self.current_segmentation_key, tuple(bbox), np.copy(self.current_segmentation[region])))
+
+    def refresh_unique_levels(self, changed_region=None):
+        """Recompute self.unique_levels exactly. After an edit, only levels that were absent from the changed region
+        need a whole-volume check, which avoids a full np.unique pass in the common case."""
+        seg = self.current_segmentation
+        if seg is None:
+            self.unique_levels = np.array([0])
+            return
+        if changed_region is None:
+            self.unique_levels = np.unique(seg)
+            return
+        in_region = np.unique(seg[changed_region])
+        levels = set(int(l) for l in in_region)
+        for level in self.unique_levels:
+            level = int(level)
+            if level not in levels and (seg == level).any():
+                levels.add(level)
+        self.unique_levels = np.array(sorted(levels), dtype=seg.dtype)
+
+    def update_level_menus_if_changed(self):
+        key = (tuple(int(l) for l in self.unique_levels), self.segmentation_level_spinbox.value(),
+               frozenset(self.invisible_levels), frozenset(self.overwrite_levels))
+        if key == getattr(self, '_level_menu_key', None):
+            return
+        self.update_overlap_level_menu()
+        self.update_segment_visibility_menu()
+        self.update_overwrite_levels_menu()
+        self._level_menu_key = key
 
     def update_segmentation_level(self):
         # Update the segmentation level based on the spinbox value
@@ -1029,14 +1159,43 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.invisible_levels.discard(level)  # Remove from invisible levels if toggled on
         else:
             self.invisible_levels.add(level)  # Add to invisible levels if toggled off
+        self.schedule_visibility_redraw()
 
-        # Redraw to reflect visibility change
-        self.update_visualization(reset_volume=False)
+    def schedule_visibility_redraw(self):
+        """Redraw once, shortly after the last visibility change, so several quick toggles cost a single re-render."""
+        timer = getattr(self, '_visibility_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(60)
+            timer.timeout.connect(self._apply_visibility_redraw)
+            self._visibility_timer = timer
+        timer.start()
+
+    def _apply_visibility_redraw(self):
+        if self.data is None:
+            return
+        self.update_visualization(reset_volume=False)  # 3D overlay refresh is debounced separately
         self.display_all_slices()
 
+    def set_all_levels_visible(self, visible):
+        self.invisible_levels = set() if visible else set(int(l) for l in self.unique_levels if l != 0)
+        for action in self.segment_visibility_menu.actions():
+            if action.isCheckable():
+                action.blockSignals(True)
+                action.setChecked(visible)
+                action.blockSignals(False)
+        self.schedule_visibility_redraw()
+
     def update_segment_visibility_menu(self):
+        self._level_menu_key = None  # menus rebuilt outside update_level_menus_if_changed
         self.segment_visibility_menu.clear()
         if self.current_segmentation is not None:
+            show_all = self.segment_visibility_menu.addAction("Show all levels")
+            show_all.triggered.connect(lambda: self.set_all_levels_visible(True))
+            hide_all = self.segment_visibility_menu.addAction("Hide all levels")
+            hide_all.triggered.connect(lambda: self.set_all_levels_visible(False))
+            self.segment_visibility_menu.addSeparator()
             for level in self.unique_levels:
                 if level != 0:  # Skip background level
                     action = QAction(f"Level {level}", self, checkable=True)
@@ -1045,6 +1204,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                     self.segment_visibility_menu.addAction(action)
 
     def update_overlap_level_menu(self):
+        self._level_menu_key = None
         current_text = self.overlap_level_combo.currentText()  # Get the current selected text
         current_level = self.segmentation_level_spinbox.value()
         levels = [level for level in self.unique_levels if level != 0 and level != current_level]
@@ -1068,6 +1228,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.overwrite_levels.discard(level)
 
     def update_overwrite_levels_menu(self):
+        self._level_menu_key = None
         self.overwrite_levels_menu.clear()
         if self.current_segmentation is not None:
             for level in self.unique_levels:
@@ -1082,6 +1243,15 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
         # Setup parameter adjustment area
         self.setup_parameter_adjustment_area()  # Initialize this first
+
+        # Hand button: left-click drag pans the image and never edits the segmentation
+        self._last_non_pan_tool = "3d_contour"
+        self.pan_action = QAction(make_hand_icon(), "Pan", self)
+        self.pan_action.setCheckable(True)
+        self.pan_action.setToolTip("Pan: left-click and drag to move the image without editing the segmentation")
+        self.pan_action.toggled.connect(self.on_pan_toggled)
+        self.toolbar.addAction(self.pan_action)
+        self._pan_separator = self.toolbar.addSeparator()  # other front-of-toolbar buttons are inserted before this
 
         # Label and combobox for selecting volumes
         volume_label = QLabel("Select MRI Volume:")
@@ -1189,11 +1359,11 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.level_name_action.setDefaultWidget(level_name_widget)
         self.toolbar.addAction(self.level_name_action)
 
-        # Set default tool to '3d_contour'
-        index = self.tool_selector.findText("3d_contour", Qt.MatchFixedString)
+        # Default tool is Pan, so clicking on a freshly loaded exam never edits anything by accident
+        index = self.tool_selector.findText("pan", Qt.MatchFixedString)
         if index >= 0:
             self.tool_selector.setCurrentIndex(index)
-            self.set_segmentation_tool("3d_contour")
+            self.set_segmentation_tool("pan")
 
         # Adding manage segmentation actions to the menu
         manage_menu = QMenu("Manage Segmentations", self)
@@ -1697,6 +1867,13 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         # If all checks pass
         return True
 
+    def on_pan_toggled(self, checked):
+        if checked:
+            self.set_segmentation_tool("pan")
+        else:
+            # Clicking the hand again goes back to the tool that was active before
+            self.set_segmentation_tool(self._last_non_pan_tool)
+
     def set_segmentation_tool(self, tool):
         # Save the current Overlap Management selection
         current_overlap_selection = self.overlap_management_combo.currentText()
@@ -1731,6 +1908,22 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.overlap_action.setVisible(False)
         elif self.current_segmentation_tool in ("change_volume_level"):
             self.overlap_action.setVisible(False)
+
+        # Keep the hand button, the tool dropdown and the view cursors in sync with the active tool
+        is_pan = self.current_segmentation_tool == 'pan'
+        if self.current_segmentation_tool and not is_pan:
+            self._last_non_pan_tool = self.current_segmentation_tool
+        self.pan_action.blockSignals(True)
+        self.pan_action.setChecked(is_pan)
+        self.pan_action.blockSignals(False)
+        tool_index = self.tool_selector.findText(self.current_segmentation_tool or "None", Qt.MatchFixedString)
+        if tool_index >= 0:
+            self.tool_selector.setCurrentIndex(tool_index)
+        for view in self.views.values():
+            if is_pan:
+                view.viewport().setCursor(Qt.OpenHandCursor)
+            else:
+                view.viewport().unsetCursor()
 
         # Restore the Overlap Management selection
         if self.overlap_action.isVisible():

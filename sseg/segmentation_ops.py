@@ -5,65 +5,107 @@ from functools import partial
 from queue import Queue
 
 import numpy as np
-from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes
+from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes, label
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
+from . import perf
+
 
 class SegmentationOpsMixin:
-    def handle_segmentation_update(self, new_segmentation, action=None, level=None):
-            self.push_to_undo_stack()
+    @staticmethod
+    def bbox_of_mask(mask):
+            """Tight bounding box of the True voxels of a 3D boolean array as ((x0,x1),(y0,y1),(z0,z1)), or None if empty."""
+            box = []
+            for axis in range(3):
+                others = tuple(a for a in range(3) if a != axis)
+                idx = np.flatnonzero(mask.any(axis=others))
+                if idx.size == 0:
+                    return None
+                box.append((int(idx[0]), int(idx[-1]) + 1))
+            return tuple(box)
+
+    @staticmethod
+    def union_bbox(a, b):
+            if a is None:
+                return b
+            if b is None:
+                return a
+            return tuple((min(x[0], y[0]), max(x[1], y[1])) for x, y in zip(a, b))
+
+    @staticmethod
+    def bbox_slices(bbox):
+            return tuple(slice(lo, hi) for lo, hi in bbox)
+
+    @perf.timed("handle_segmentation_update")
+    def handle_segmentation_update(self, new_segmentation, action=None, level=None, bbox=None):
+            """Apply `new_segmentation` to the current segmentation.
+
+            Only the bounding box that can change is touched, copied for undo, and re-rendered. `bbox`
+            ((x0,x1),(y0,y1),(z0,z1)) may be passed by callers that already know it (e.g. brush strokes).
+            """
             if action is None:
                 action = self.new_segmentation_overlap
             if level is None:
                 level = self.segmentation_level
-            
-            if self.current_segmentation_key:
 
-                current_seg = self.current_segmentation
+            if not self.current_segmentation_key:
+                return
+            current_seg = self.current_segmentation
 
-                if self.roi_mask is not None:
-                    new_segmentation = self.roi_mask & (new_segmentation != 0)
+            if bbox is None:
+                bbox = self.bbox_of_mask(new_segmentation != 0)
+                if action == "replace_level":
+                    # replace_level also clears the level wherever it currently exists
+                    bbox = self.union_bbox(bbox, self.bbox_of_mask(current_seg == level))
+                if bbox is None:
+                    return  # nothing can change
+            region = self.bbox_slices(bbox)
 
-                if action == "add_around":
-                    mask = (current_seg == 0)  # Mask where there is no segmentation
-                    current_seg[mask] = new_segmentation[mask] * level
-                elif action == "overwrite":
-                    mask = (new_segmentation != 0) & np.isin(current_seg, list(self.overwrite_levels))
-                    current_seg[mask] = level
-                elif action == "overwrite_all":
-                    mask = (new_segmentation != 0)
-                    current_seg[mask] = level
-                elif action == "erase":
-                    mask = (new_segmentation != 0)  # Mask where the new segmentation is applied
-                    current_seg[mask] = 0  # Erase overlapping areas
-                elif action == "erase_level":
-                    mask = (new_segmentation != 0) & (current_seg == level)  # Mask where new segmentation overlaps with the selected level
-                    current_seg[mask] = 0  # Erase only the selected level
-                elif action == "replace_level":
-                    # Set the current level to 0
-                    current_seg[current_seg == level] = 0
-                    # Apply new segmentation to current level
-                    mask = (new_segmentation != 0)
-                    current_seg[mask] = level
-                elif action == "overlap_only":
-                    overlap_level = self.overlap_level_combo.currentText()
-                    if overlap_level != "All":
-                        mask = (current_seg == int(overlap_level)) & (new_segmentation == 1)
-                        current_seg[mask] = level
-                    else:
-                        mask = (current_seg != 0) & (new_segmentation == 1)
-                        current_seg[mask] = level
-                
-                self.segmentation_volumes[self.current_segmentation_key] = current_seg
-                self.current_segmentation = current_seg  # Update the current segmentation
-                self.mark_segmentation_dirty(self.current_segmentation_key, True)
-                self.unique_levels = np.unique(self.current_segmentation)
-                self.update_overlap_level_menu()
-                self.update_segment_visibility_menu()
-                self.update_overwrite_levels_menu()
-                self.update_visualization(reset_volume=False)
-                self.display_all_slices()
+            self.push_to_undo_stack(bbox)
+
+            cur = current_seg[region]  # view: assignments below modify current_seg in place
+            new = new_segmentation[region]
+            if self.roi_mask is not None:
+                new = self.roi_mask[region] & (new != 0)
+
+            if action == "add_around":
+                mask = (cur == 0)  # Mask where there is no segmentation
+                cur[mask] = new[mask] * level
+            elif action == "overwrite":
+                mask = (new != 0) & np.isin(cur, list(self.overwrite_levels))
+                cur[mask] = level
+            elif action == "overwrite_all":
+                mask = (new != 0)
+                cur[mask] = level
+            elif action == "erase":
+                mask = (new != 0)  # Mask where the new segmentation is applied
+                cur[mask] = 0  # Erase overlapping areas
+            elif action == "erase_level":
+                mask = (new != 0) & (cur == level)  # Mask where new segmentation overlaps with the selected level
+                cur[mask] = 0  # Erase only the selected level
+            elif action == "replace_level":
+                # Set the current level to 0
+                cur[cur == level] = 0
+                # Apply new segmentation to current level
+                mask = (new != 0)
+                cur[mask] = level
+            elif action == "overlap_only":
+                overlap_level = self.overlap_level_combo.currentText()
+                if overlap_level != "All":
+                    mask = (cur == int(overlap_level)) & (new == 1)
+                    cur[mask] = level
+                else:
+                    mask = (cur != 0) & (new == 1)
+                    cur[mask] = level
+
+            self.segmentation_volumes[self.current_segmentation_key] = current_seg
+            self.current_segmentation = current_seg  # Update the current segmentation
+            self.mark_segmentation_dirty(self.current_segmentation_key, True)
+            self.refresh_unique_levels(changed_region=region)
+            self.update_level_menus_if_changed()
+            self.update_visualization(reset_volume=False, dirty_bbox=bbox)
+            self.display_all_slices()
 
     def get_gradient_parameters(self):
             # Fetch and convert the intensity and gradient percentages from QLineEdit to float
@@ -121,7 +163,27 @@ class SegmentationOpsMixin:
             else:
                 self.current_seg_slice_cache_2d = seg_slice_data
             self.brush_cache_2d = np.zeros_like(self.brush_slice_cache, dtype=int)
+            self._last_brush_point = None
 
+    def _brush_disk(self, radius):
+            cache = self.__dict__.setdefault('_brush_disk_cache', {})
+            disk = cache.get(radius)
+            if disk is None:
+                offsets = np.arange(-radius, radius + 1)
+                disk = (offsets[:, None] ** 2 + offsets[None, :] ** 2) <= radius ** 2
+                cache[radius] = disk
+            return disk
+
+    def _stamp_brush(self, disk, radius, y, x):
+            rows, cols = self.brush_cache_2d.shape
+            y0, y1 = max(0, y - radius), min(rows, y + radius + 1)
+            x0, x1 = max(0, x - radius), min(cols, x + radius + 1)
+            if y0 >= y1 or x0 >= x1:
+                return
+            sub = disk[y0 - (y - radius):y1 - (y - radius), x0 - (x - radius):x1 - (x - radius)]
+            self.brush_cache_2d[y0:y1, x0:x1][sub] = 1
+
+    @perf.timed("apply_2d_brush")
     def apply_2d_brush(self, coord):
             if self.current_segmentation is None or not self.is_drawing_2d_brush:
                 return
@@ -138,15 +200,19 @@ class SegmentationOpsMixin:
             elif orientation == 'sagittal':
                 slice_index, y, x = coord
 
-            # Define bounds for brush application
-            x_start, x_end = max(0, x - half_brush_size), min(self.brush_cache_2d.shape[1], x + half_brush_size + 1)
-            y_start, y_end = max(0, y - half_brush_size), min(self.brush_cache_2d.shape[0], y + half_brush_size + 1)
-
-            # Update the brush cache
-            for i in range(y_start, y_end):
-                for j in range(x_start, x_end):
-                    if np.sqrt((i - y) ** 2 + (j - x) ** 2) <= half_brush_size:
-                        self.brush_cache_2d[i, j] = 1
+            # Stamp a precomputed disk along the path from the previous mouse position, so fast
+            # strokes leave no gaps. (The disk is cached per radius; a point is inside if its distance <= radius.)
+            disk = self._brush_disk(half_brush_size)
+            last = getattr(self, '_last_brush_point', None)
+            if last is not None and last[0] == orientation:
+                steps = max(abs(y - last[1]), abs(x - last[2]), 1)
+                ys = np.rint(np.linspace(last[1], y, steps + 1)).astype(int)
+                xs = np.rint(np.linspace(last[2], x, steps + 1)).astype(int)
+            else:
+                ys, xs = np.array([y]), np.array([x])
+            for py, px in zip(ys, xs):
+                self._stamp_brush(disk, half_brush_size, int(py), int(px))
+            self._last_brush_point = (orientation, y, x)
 
             # Update the overlay in the viewer
             self.update_2d_brush_highlights(orientation)
@@ -167,7 +233,7 @@ class SegmentationOpsMixin:
                 slice_index, y, x = self.coord
                 max_slice = self.data.shape[0]
 
-            new_segmentation = np.zeros_like(self.current_segmentation, dtype=int)
+            new_segmentation = np.zeros(self.current_segmentation.shape, dtype=bool)
             thickness = self.brush_thickness_slider.value()
 
             if thickness % 2 == 0:
@@ -194,6 +260,19 @@ class SegmentationOpsMixin:
             elif orientation == 'sagittal':
                 new_segmentation[start_slice:end_slice, :, :] = np.tile(self.brush_cache_2d[np.newaxis, :, :], (end_slice - start_slice, 1, 1))
 
+            # Bounding box of the painted slab (in-plane extent from the 2D cache), so the update only touches it
+            bbox = None
+            rows = np.flatnonzero(self.brush_cache_2d.any(axis=1))
+            cols = np.flatnonzero(self.brush_cache_2d.any(axis=0))
+            if rows.size and cols.size and end_slice > start_slice:
+                r, c, sl = (int(rows[0]), int(rows[-1]) + 1), (int(cols[0]), int(cols[-1]) + 1), (start_slice, end_slice)
+                if orientation == 'axial':
+                    bbox = (r, c, sl)
+                elif orientation == 'coronal':
+                    bbox = (r, sl, c)
+                else:
+                    bbox = (sl, r, c)
+
             # Cleaning up caches
             self.brush_cache_2d = None
             self.current_seg_slice_cache_2d = None
@@ -203,7 +282,7 @@ class SegmentationOpsMixin:
             if returnROI:
                 return new_segmentation
             else:
-                self.handle_segmentation_update(new_segmentation)
+                self.handle_segmentation_update(new_segmentation, bbox=bbox)
                 return None
 
     def modify_segmentation_borders(self, change_value, action = "grow"):
@@ -224,40 +303,12 @@ class SegmentationOpsMixin:
                 self.handle_segmentation_update(modified_mask)
 
     def find_contiguous_volume(self, start_coord, level):
-            directions = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
-            queue = Queue()
-            queue.put(start_coord)
-            mask = np.zeros_like(self.current_segmentation, dtype=bool)
-        
-            # Setting up the progress dialog
-            progress = QProgressDialog("Finding contiguous volume...", "Cancel", 0, 100, self)
-            progress.setWindowTitle("Processing")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-            total_voxels = np.prod(self.current_segmentation.shape)
-            processed_voxels = 0
-
-            while not queue.empty():
-                if progress.wasCanceled():
-                    break
-            
-                z, y, x = queue.get()
-                for dz, dy, dx in directions:
-                    nz, ny, nx = z + dz, y + dy, x + dx
-                    if 0 <= nz < self.current_segmentation.shape[0] and 0 <= ny < self.current_segmentation.shape[1] and 0 <= nx < self.current_segmentation.shape[2]:
-                        if self.current_segmentation[nz, ny, nx] == level and not mask[nz, ny, nx]:
-                            mask[nz, ny, nx] = True
-                            queue.put((nz, ny, nx))
-            
-                processed_voxels += 1
-                progress.setValue(int((processed_voxels / total_voxels) * 100))
-
-                # Process GUI events to update the dialog
-                QApplication.processEvents()
-
-            progress.setValue(100)  # Ensure completion is marked
-            return mask
+            """Boolean mask of the 6-connected region of voxels equal to `level` that contains `start_coord`."""
+            labels, _ = label(self.current_segmentation == level)  # default structure: 6-connectivity in 3D
+            seed_label = labels[tuple(start_coord)]
+            if seed_label == 0:
+                return np.zeros(self.current_segmentation.shape, dtype=bool)
+            return labels == seed_label
 
     def apply_remove_contiguous_volume(self):
             if self.coord:
@@ -343,7 +394,7 @@ class SegmentationOpsMixin:
             # Initialize the mask and process list
             mask = np.zeros_like(self.data, dtype=bool)
             mask[seed_point] = True
-            process_list = [seed_point]
+            process_list = deque([tuple(int(c) for c in seed_point)])
 
             connectivity = [
                 (1, 0, 0), (-1, 0, 0),
@@ -362,11 +413,11 @@ class SegmentationOpsMixin:
                     QMessageBox.information(self, "Gradient Tracing", "Operation aborted by user.")
                     return np.zeros_like(self.data, dtype=bool)
 
-                current_point = process_list.pop(0)
+                current_point = process_list.popleft()
                 current_intensity = self.data[current_point]
 
                 for conn in connectivity:
-                    neighbor = tuple(np.add(current_point, conn))
+                    neighbor = (current_point[0] + conn[0], current_point[1] + conn[1], current_point[2] + conn[2])
 
                     # Ensure neighbor is within bounds
                     if all(0 <= n < s for n, s in zip(neighbor, self.data.shape)):
@@ -384,7 +435,9 @@ class SegmentationOpsMixin:
                             process_list.append(neighbor)
 
                 tick += 1
-                progress_dialog.setValue(tick)
+                if tick % 1000 == 0:  # updating the dialog every voxel dominated the run time
+                    progress_dialog.setValue(tick)
+                    QApplication.processEvents()
 
             progress_dialog.close()
 
@@ -457,6 +510,19 @@ class SegmentationOpsMixin:
             max_iterations = parameters.get('max_iterations', 1000000)
             neighborhood_size = parameters.get('neighborhood_size', 1)  # Default neighborhood size is 1
                 
+            # Fast path: the grown region is the set of acceptable voxels connected (6-connectivity) to the seeds,
+            # which connected-component labelling computes directly. It is exactly equivalent to the loop below
+            # whenever the iteration cap is not reached; otherwise fall through to the original loop.
+            acceptable = roi_mask & (np.abs(self.data - roi_mean) <= intensity_threshold * roi_std)
+            touching = binary_dilation(seed_mask) | seed_mask
+            labels, _ = label(acceptable)
+            wanted = np.unique(labels[touching & acceptable])
+            wanted = wanted[wanted != 0]
+            fast_mask = (seed_mask & roi_mask) | (np.isin(labels, wanted) if wanted.size else False)
+            added = int(fast_mask.sum()) - int((seed_mask & roi_mask).sum())
+            if int(seed_mask.sum()) + max(added, 0) <= max_iterations:
+                return fast_mask
+
             # Initialize the mask and the processed array as boolean arrays
             mask = seed_mask.copy()
             mask &= roi_mask  # Ensure seed_mask is within ROI

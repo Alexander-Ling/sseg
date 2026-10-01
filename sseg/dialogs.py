@@ -60,7 +60,7 @@ class ParameterDialog(QDialog):
         self.viewer.steepness = self.steepness_slider.value()
         self.viewer.exponent = self.exponent_slider.value()
         self.viewer.opacity_multiplier = self.opacity_multiplier_slider.value()
-        self.viewer.update_visualization(reset_volume=True)
+        self.viewer.update_3d_opacity()
 
     def reset_parameters(self):
         self.viewer.steepness = self.viewer.default_steepness
