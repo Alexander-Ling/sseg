@@ -292,6 +292,7 @@ class SliceViewMixin:
             # Only update planes if any are visible
             if any(self.plane_visibility.values()):
                 self.update_planes()
+                self.request_3d_render()
 
             self._display_slice_throttled(orientation)
 

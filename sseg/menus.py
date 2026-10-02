@@ -12,7 +12,8 @@ class PersistentMenu(QMenu):
 
     def mouseReleaseEvent(self, event):
         action = self.actionAt(event.pos())
-        if action and action.isCheckable():
+        # Checkable items, and items flagged with property keepOpen (e.g. "Show all"), do not close the menu
+        if action and action.isEnabled() and (action.isCheckable() or action.property("keepOpen")):
             action.trigger()
             return
         super().mouseReleaseEvent(event)

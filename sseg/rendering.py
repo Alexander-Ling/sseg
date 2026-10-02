@@ -253,12 +253,18 @@ class RenderingMixin:
                         plane = Plane(center=centers[key], direction=directions[key], i_size=dims[0], j_size=dims[1])
                         mesh = self.plotter_3d.add_mesh(plane, color=colors[key], opacity=0.6, reset_camera=False, name=f"{key}_plane")
                         self.plane_meshes[key] = (plane, mesh)
+                        self._plane_base_centers = getattr(self, '_plane_base_centers', {})
+                        self._plane_base_centers[key] = np.array(centers[key], dtype=float)
                     else:
-                        # Update the position of the existing plane
+                        # Move the existing plane actor by the offset from where the plane was created.
+                        # (Assigning attributes to the PolyData, as this used to do, raises in current pyvista
+                        # versions; that exception aborted display_all_slices before any 2D view was redrawn.)
                         plane, mesh = self.plane_meshes[key]
-                        plane.origin = centers[key]
-                        plane.update()
-                        mesh.SetPosition(plane.center)
+                        base = self._plane_base_centers.get(key)
+                        if base is None:
+                            base = np.array(plane.center, dtype=float)
+                            self._plane_base_centers[key] = base
+                        mesh.SetPosition(*(np.array(centers[key], dtype=float) - base))
                 else:
                     if key in self.plane_meshes:
                         # Remove the plane from the plotter
@@ -674,13 +680,19 @@ class RenderingMixin:
             self.view_sagittal.setStyleSheet("border: 2px solid yellow;")
 
     def display_all_slices(self):
-            # First, update the planes' positions according to the current slice indices
-            self.update_planes()
-
             # Display each slice in its respective viewer
             self.display_axial_slice()
             self.display_coronal_slice()
             self.display_sagittal_slice()
+
+            # Then move the 3D planes to the current slice indices; a 3D problem must never block the 2D views
+            try:
+                self.update_planes()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            if any(self.plane_visibility.values()):
+                self.request_3d_render()
 
     def get_roi_slice_2d(self, orientation):
             if self.roi_mask is None:

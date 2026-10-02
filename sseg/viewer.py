@@ -131,8 +131,9 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.add_plane_toggle_action(plane_menu, 'Sagittal', 'sagittal')
         self.tools_menu.addMenu(plane_menu)
         
-        self.segment_visibility_menu = PersistentMenu("Toggle Segment Visibility", self)
-        self.tools_menu.addMenu(self.segment_visibility_menu)
+        # First-level menu so segmentation levels can be shown/hidden with a single click on the menu bar
+        self.segment_visibility_menu = PersistentMenu("Segmentation Levels", self, tear_off=False)
+        self.menu_bar.addMenu(self.segment_visibility_menu)
 
         self.plane_meshes = {}
 
@@ -284,6 +285,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         if self.data is None:
             self.show_empty_state()
 
+        self.update_segment_visibility_menu()
         # Handle undo and redo operations (state is initialized before loading, see above)
         undo_action = QAction("Undo", self)
         undo_action.setShortcut("Ctrl+Z")
@@ -1190,12 +1192,17 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
     def update_segment_visibility_menu(self):
         self._level_menu_key = None  # menus rebuilt outside update_level_menus_if_changed
         self.segment_visibility_menu.clear()
-        if self.current_segmentation is not None:
-            show_all = self.segment_visibility_menu.addAction("Show all levels")
-            show_all.triggered.connect(lambda: self.set_all_levels_visible(True))
-            hide_all = self.segment_visibility_menu.addAction("Hide all levels")
-            hide_all.triggered.connect(lambda: self.set_all_levels_visible(False))
-            self.segment_visibility_menu.addSeparator()
+        has_segmentation = self.current_segmentation is not None
+        # Show all / Hide all are always present (disabled until a segmentation is loaded) and keep the menu open
+        show_all = self.segment_visibility_menu.addAction("Show all levels")
+        show_all.triggered.connect(lambda: self.set_all_levels_visible(True))
+        hide_all = self.segment_visibility_menu.addAction("Hide all levels")
+        hide_all.triggered.connect(lambda: self.set_all_levels_visible(False))
+        for action in (show_all, hide_all):
+            action.setProperty("keepOpen", True)
+            action.setEnabled(has_segmentation)
+        self.segment_visibility_menu.addSeparator()
+        if has_segmentation:
             for level in self.unique_levels:
                 if level != 0:  # Skip background level
                     action = QAction(f"Level {level}", self, checkable=True)

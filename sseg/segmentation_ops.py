@@ -286,21 +286,19 @@ class SegmentationOpsMixin:
                 return None
 
     def modify_segmentation_borders(self, change_value, action = "grow"):
-            if self.current_segmentation is not None:
-                segmentation_mask = self.current_segmentation == self.segmentation_level
-                if action == "grow":
-                    modified_mask = binary_dilation(segmentation_mask, iterations=change_value)
-                    self.handle_segmentation_update(modified_mask)
-                elif action == "shrink":
-                    modified_mask = binary_erosion(segmentation_mask, iterations=change_value)
-                    self.handle_segmentation_update(modified_mask, action = "replace_level")
-                elif action == "hollow":
-                    modified_mask = binary_erosion(segmentation_mask, iterations=change_value)
-                    self.handle_segmentation_update(modified_mask, action = "erase_level")
-                    return  # No change needed
-
-                # Apply the modified mask to the current segmentation level
+            if self.current_segmentation is None:
+                return
+            # One call to handle_segmentation_update per operation, so each Grow/Shrink/Hollow is a single undo step.
+            segmentation_mask = self.current_segmentation == self.segmentation_level
+            if action == "grow":
+                modified_mask = binary_dilation(segmentation_mask, iterations=change_value)
                 self.handle_segmentation_update(modified_mask)
+            elif action == "shrink":
+                modified_mask = binary_erosion(segmentation_mask, iterations=change_value)
+                self.handle_segmentation_update(modified_mask, action = "replace_level")
+            elif action == "hollow":
+                modified_mask = binary_erosion(segmentation_mask, iterations=change_value)
+                self.handle_segmentation_update(modified_mask, action = "erase_level")
 
     def find_contiguous_volume(self, start_coord, level):
             """Boolean mask of the 6-connected region of voxels equal to `level` that contains `start_coord`."""
