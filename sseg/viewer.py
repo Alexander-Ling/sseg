@@ -1898,6 +1898,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
         # Update current tool
         self.current_segmentation_tool = tool.lower() if tool != "None" else None
+        self.stop_panning()  # switching tools always ends any pan drag
 
         # Show relevant parameter widgets based on the selected tool
         if self.current_segmentation_tool in ('3d_contour', '3d_contour_global'):

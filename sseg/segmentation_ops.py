@@ -223,14 +223,18 @@ class SegmentationOpsMixin:
                 return
 
             orientation = self.get_orientation_by_view(self.current_view)
+            if orientation is None or self.brush_cache_2d is None:
+                return
+
+            # Use the view's slice index rather than self.coord, which is None if the cursor left the image before release
             if orientation == 'axial':
-                y, x, slice_index = self.coord
+                slice_index = self.axial_index
                 max_slice = self.data.shape[2]
             elif orientation == 'coronal':
-                y, slice_index, x = self.coord
+                slice_index = self.coronal_index
                 max_slice = self.data.shape[1]
             elif orientation == 'sagittal':
-                slice_index, y, x = self.coord
+                slice_index = self.sagittal_index
                 max_slice = self.data.shape[0]
 
             new_segmentation = np.zeros(self.current_segmentation.shape, dtype=bool)
