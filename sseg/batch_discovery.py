@@ -370,6 +370,22 @@ def get_exam_segmentation_paths(exam: DiscoveredExam, selected_types: Optional[l
     return paths
 
 
+def exam_matches_segmentation_filter(exam: DiscoveredExam, seg_types: list[str], require_all: bool, require_any: bool) -> bool:
+    """Whether an exam passes the 'all selected' / 'at least one selected' segmentation filters.
+
+    seg_types should already be resolved (None -> every detected type) by the caller.
+    An empty selection requires nothing.
+    """
+    if not seg_types:
+        return True
+    present = [seg_type in exam.segmentation_paths_by_type for seg_type in seg_types]
+    if require_all:
+        return all(present)
+    if require_any:
+        return any(present)
+    return True
+
+
 def exam_has_all_selected_series(exam: DiscoveredExam, suffix: str, selected_series: list[str]) -> bool:
     if not selected_series:
         return True

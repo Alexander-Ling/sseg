@@ -67,6 +67,8 @@ class BatchLaunchSelection:
     require_all_selected_series: bool = False
     # None means every detected segmentation type is loaded; [] means none are
     selected_segmentation_types: Optional[list[str]] = None
+    require_all_selected_segmentation_types: bool = False
+    require_any_selected_segmentation_type: bool = False
 
 
 @dataclass

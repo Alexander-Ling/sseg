@@ -52,35 +52,41 @@ class SliceViewMixin:
             item.setRect(scene_pos.x() - radius, scene_pos.y() - radius, brush_size, brush_size)
             item.setVisible(True)
 
-    def stop_panning(self, source=None):
-            """End any pan drag and put the cursor back to what the active tool expects."""
+    def stop_panning(self):
+            """End any pan drag and put every view's cursor back to what the active tool expects.
+
+            All views are reset, not just the one that saw the event: a missed release can leave the
+            closed hand on the view where the pan started while the next event arrives from another.
+            """
             self.panning = False
-            sources = [source] if source is not None else [v.viewport() for v in self.views.values()]
-            for target in sources:
+            for view in self.views.values():
                 if self.current_segmentation_tool == "pan":
-                    target.setCursor(QCursor(Qt.OpenHandCursor))
+                    view.viewport().setCursor(QCursor(Qt.OpenHandCursor))
                 else:
-                    target.unsetCursor()
+                    view.viewport().unsetCursor()
 
     def eventFilter(self, source, event):
+            # This filter is also installed on the main window, which receives mouse events that child
+            # widgets (labels, toolbar gaps, ...) ignore. Pan and drawing logic must only react to the
+            # slice views, or it sets cursors on the main window that every view then inherits.
+            is_view = any(v.viewport() is source for v in self.views.values())
 
             # Handling mouse button press
-            if event.type() == QEvent.MouseButtonPress:
+            if event.type() == QEvent.MouseButtonPress and is_view:
                 if self.panning:
-                    self.stop_panning(source)  # a release was missed earlier; never carry a stale pan into a new click
+                    self.stop_panning()  # a release was missed earlier; never carry a stale pan into a new click
                 if event.buttons() == Qt.RightButton:  # Use right mouse click for panning
                     self.panning = True
                     self.last_pan_point = event.pos()
                     source.setCursor(QCursor(Qt.ClosedHandCursor))
                     return True
-                elif (event.buttons() == Qt.LeftButton and self.current_segmentation_tool == "pan"
-                        and source in [self.view_axial.viewport(), self.view_coronal.viewport(), self.view_sagittal.viewport()]):
+                elif event.buttons() == Qt.LeftButton and self.current_segmentation_tool == "pan":
                     # Pan tool: left-drag moves the image; nothing is ever written to the segmentation
                     self.panning = True
                     self.last_pan_point = event.pos()
                     source.setCursor(QCursor(Qt.ClosedHandCursor))
                     return True
-                elif event.buttons() == Qt.LeftButton and source in [self.view_axial.viewport(), self.view_coronal.viewport(), self.view_sagittal.viewport()]:
+                elif event.buttons() == Qt.LeftButton:
                     if self.current_segmentation is not None and self.current_segmentation_tool:
                         if self.current_segmentation_tool in ("2d_brush", "3d_patch_contour") and self.coord:
                             self.is_drawing_2d_brush = True
@@ -115,12 +121,12 @@ class SliceViewMixin:
                             return True
 
             # Handling mouse button release
-            elif event.type() == QEvent.MouseButtonRelease:
+            elif event.type() == QEvent.MouseButtonRelease and is_view:
                 if event.button() == Qt.RightButton or (event.button() == Qt.LeftButton and self.current_segmentation_tool == "pan"):
-                    self.stop_panning(source)
+                    self.stop_panning()
                     return True
                 elif self.panning:
-                    self.stop_panning(source)  # any other release also ends a pan that is somehow still active
+                    self.stop_panning()  # any other release also ends a pan that is somehow still active
                 elif event.button() == Qt.LeftButton and self.current_segmentation_tool == "2d_brush":
                     self.finalize_2d_brush_strokes()
                     self.is_drawing_2d_brush = False
@@ -140,7 +146,7 @@ class SliceViewMixin:
                     if self.panning and not (event.buttons() & (Qt.LeftButton | Qt.RightButton)):
                         # No button is down, so the release that should have ended this pan never arrived.
                         # Without this the image keeps following the mouse and tools stop responding.
-                        self.stop_panning(source)
+                        self.stop_panning()
                     if self.panning:
                         delta = event.pos() - self.last_pan_point
                         view.horizontalScrollBar().setValue(view.horizontalScrollBar().value() - delta.x())

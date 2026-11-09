@@ -18,6 +18,7 @@ from .batch_discovery import (
     analyze_exam,
     discover_exams,
     exam_has_all_selected_series,
+    exam_matches_segmentation_filter,
     exam_sort_key,
     get_available_series_types_for_suffix,
     count_exams_with_segmentation_type,
@@ -123,6 +124,12 @@ class BatchDiscoveryTab(QWidget):
         self.seg_type_list.itemSelectionChanged.connect(self.on_seg_type_selection_changed)
         self.seg_type_list.setMinimumHeight(70)
         planning_form.addRow('Segmentation types to load:', self.seg_type_list)
+        self.require_all_seg_checkbox = QCheckBox('Only display exams that contain all selected segmentation types')
+        self.require_all_seg_checkbox.toggled.connect(self.on_seg_filter_toggled)
+        planning_form.addRow('', self.require_all_seg_checkbox)
+        self.require_any_seg_checkbox = QCheckBox('Only display exams that contain at least 1 selected segmentation type')
+        self.require_any_seg_checkbox.toggled.connect(self.on_seg_filter_toggled)
+        planning_form.addRow('', self.require_any_seg_checkbox)
         root.addWidget(planning_group)
 
         results_group = QGroupBox('Discovered exams')
@@ -224,6 +231,8 @@ class BatchDiscoveryTab(QWidget):
             self.series_list.clear()
             self.require_all_checkbox.setChecked(False)
             self.seg_type_list.clear()
+            self.require_all_seg_checkbox.setChecked(False)
+            self.require_any_seg_checkbox.setChecked(False)
             return
         sel = self.discovery_result.launch_selection
         detected_suffixes = get_detected_suffixes(self.discovery_result)
@@ -244,6 +253,15 @@ class BatchDiscoveryTab(QWidget):
         self.require_all_checkbox.blockSignals(True)
         self.require_all_checkbox.setChecked(bool(sel.require_all_selected_series))
         self.require_all_checkbox.blockSignals(False)
+        require_all_seg = bool(sel.require_all_selected_segmentation_types)
+        for checkbox, checked in (
+            (self.require_all_seg_checkbox, require_all_seg),
+            (self.require_any_seg_checkbox, bool(sel.require_any_selected_segmentation_type) and not require_all_seg),
+        ):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(False)
+        self._update_seg_filter_enabled()
         self._populate_series_list()
         self._populate_seg_type_list()
 
@@ -303,6 +321,15 @@ class BatchDiscoveryTab(QWidget):
         ]
         self.refresh_results_table()
 
+    def _update_seg_filter_enabled(self) -> None:
+        # The 'all' and 'at least one' filters are mutually exclusive: checking one grays out the other.
+        self.require_all_seg_checkbox.setEnabled(not self.require_any_seg_checkbox.isChecked())
+        self.require_any_seg_checkbox.setEnabled(not self.require_all_seg_checkbox.isChecked())
+
+    def on_seg_filter_toggled(self, _checked: bool = False) -> None:
+        self._update_seg_filter_enabled()
+        self.refresh_results_table()
+
     def set_discovery_result(self, result: BatchDiscoveryResult) -> None:
         self.discovery_result = result
         self._pending_launch_selection = None
@@ -348,11 +375,18 @@ class BatchDiscoveryTab(QWidget):
         result.launch_selection.require_all_selected_series = require_all
 
         selected_seg_types = result.launch_selection.selected_segmentation_types
+        require_all_seg = bool(self.require_all_seg_checkbox.isChecked())
+        require_any_seg = bool(self.require_any_seg_checkbox.isChecked())
+        result.launch_selection.require_all_selected_segmentation_types = require_all_seg
+        result.launch_selection.require_any_selected_segmentation_type = require_any_seg
+        required_seg_types = get_detected_segmentation_types(result) if selected_seg_types is None else selected_seg_types
         rows = []
         for exam in result.exams:
             if suffix and suffix not in exam.available_suffixes:
                 continue
             if require_all and suffix and not exam_has_all_selected_series(exam, suffix, selected_series):
+                continue
+            if not exam_matches_segmentation_filter(exam, required_seg_types, require_all_seg, require_any_seg):
                 continue
             suffixes_display = ', '.join(exam.available_suffixes)
             if suffix:

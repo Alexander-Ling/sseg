@@ -41,7 +41,12 @@ from queue import Queue
 from functools import partial
 from collections import deque
 
-from .batch_discovery import exam_sort_key, get_exam_segmentation_paths
+from .batch_discovery import (
+    exam_matches_segmentation_filter,
+    exam_sort_key,
+    get_detected_segmentation_types,
+    get_exam_segmentation_paths,
+)
 from .dialogs import ParameterDialog, RotationDialog
 from .hotkeys import GlobalHotkeyFilter
 from .icons import make_hand_icon
@@ -637,6 +642,10 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             return []
         selected_series = list(selection.selected_series_types or [])
         require_all = bool(selection.require_all_selected_series)
+        require_all_seg = bool(selection.require_all_selected_segmentation_types)
+        require_any_seg = bool(selection.require_any_selected_segmentation_type)
+        selected_seg_types = selection.selected_segmentation_types
+        required_seg_types = get_detected_segmentation_types(result) if selected_seg_types is None else selected_seg_types
         exams = []
         for exam in result.exams:
             if suffix not in exam.available_suffixes:
@@ -645,6 +654,8 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 available = set(exam.available_series_types_by_suffix.get(suffix, []))
                 if not all(series in available for series in selected_series):
                     continue
+            if not exam_matches_segmentation_filter(exam, required_seg_types, require_all_seg, require_any_seg):
+                continue
             exams.append(exam)
         exams.sort(key=exam_sort_key)
         return exams
