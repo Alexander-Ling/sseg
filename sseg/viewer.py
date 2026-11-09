@@ -926,38 +926,21 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 self.switch_volume(volume_name)
 
     def quicksave_to_nrrd(self):
-        current_key = self.current_segmentation_key
-        for seg_name in self.segmentation_volumes.keys():
-            try:
-                file_path = os.path.join(self.default_save_directory(), seg_name)
-                file_path = re.sub(r'\.seg\.nrrd$', '', file_path) # Strip .seg.nrrd extension if it exists
-                file_path = re.sub(r'\.nrrd$', '', file_path) # Strip .nrrd extension if it exists
-                file_path = re.sub(r'\.nii$', '', file_path) # Strip .nii extension if it exists
-                file_path = re.sub(r'\.nii.gz$', '', file_path) # Strip .nii.gz extension if it exists
-                file_path = file_path + '.seg.nrrd'
-                self.switch_segmentation(seg_name)
-                self.save_as_nrrd(file_path)
-                self.mark_segmentation_dirty(seg_name, False)
-            except Exception as e:
-                QMessageBox.critical(self, "Quicksave Error", f"Failed to quicksave segmentation '{seg_name}':\n{str(e)}")
-        self.switch_segmentation(current_key)
+        self.quicksave_current_segmentation('.seg.nrrd', self.save_as_nrrd)
 
     def quicksave_to_nifti(self):
-        current_key = self.current_segmentation_key
-        for seg_name in self.segmentation_volumes.keys():
-            try:
-                file_path = os.path.join(self.default_save_directory(), seg_name)
-                file_path = re.sub(r'\.seg\.nrrd$', '', file_path) # Strip .seg.nrrd extension if it exists
-                file_path = re.sub(r'\.nrrd$', '', file_path) # Strip .nrrd extension if it exists
-                file_path = re.sub(r'\.nii$', '', file_path) # Strip .nii extension if it exists
-                file_path = re.sub(r'\.nii.gz$', '', file_path) # Strip .nii.gz extension if it exists
-                file_path = file_path + '.nii.gz'
-                self.switch_segmentation(seg_name)
-                self.save_as_nifti(file_path)
-                self.mark_segmentation_dirty(seg_name, False)
-            except Exception as e:
-                QMessageBox.critical(self, "Quicksave Error", f"Failed to quicksave segmentation '{seg_name}':\n{str(e)}")
-        self.switch_segmentation(current_key)
+        self.quicksave_current_segmentation('.nii.gz', self.save_as_nifti)
+
+    def quicksave_current_segmentation(self, extension, save_function):
+        seg_name = self.current_segmentation_key
+        if not seg_name or self.current_segmentation is None:
+            QMessageBox.warning(self, "Quicksave", "No segmentation selected or loaded to save.")
+            return
+        file_path = os.path.join(self.default_save_directory(), seg_name)
+        file_path = re.sub(r'\.seg\.nrrd$|\.nrrd$|\.nii\.gz$|\.nii$', '', file_path) # Strip existing extension
+        file_path = file_path + extension
+        if save_function(file_path):
+            self.mark_segmentation_dirty(seg_name, False)
 
     def save_current_segmentation(self):
         if not self.current_segmentation_key or self.current_segmentation is None:
@@ -976,16 +959,20 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             return  # User cancelled the save dialog
 
         # Append file extension if missing
+        saved = False
         if selected_filter == "Nifti File (*.nii.gz)":
             if not (file_path.endswith('.nii.gz') or file_path.endswith('.nii')):
                 file_path += '.nii.gz'
-            self.save_as_nifti(file_path)
+            saved = self.save_as_nifti(file_path)
         elif selected_filter == "NRRD File (*.seg.nrrd)":
             if not file_path.endswith('.seg.nrrd'):
                 file_path += '.seg.nrrd'
-            self.save_as_nrrd(file_path)
+            saved = self.save_as_nrrd(file_path)
         else:
             QMessageBox.warning(self, "Save Segmentation", "Unrecognized file format selected.")
+
+        if saved:
+            self.mark_segmentation_dirty(self.current_segmentation_key, False)
 
     def default_save_directory(self):
         return compute_default_save_directory(self.volume_paths, self.segmentation_paths)
@@ -999,8 +986,10 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 master_affine=self.master_affine,
             )
             QMessageBox.information(self, "Save Successful", f"Segmentation saved successfully:\n{file_path}")
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Failed to save segmentation as NIfTI:\n{str(e)}")
+            return False
 
     def get_rgb(self, color_name):
         return color_name_to_rgb(color_name)
@@ -1008,7 +997,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
     def save_as_nrrd(self, file_path):
         if self.current_segmentation is None:
             QMessageBox.warning(self, "Error", "No segmentation available to save.")
-            return
+            return False
 
         try:
             save_segmentation_nrrd(
@@ -1020,8 +1009,10 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 level_names=self.segmentation_names.get(self.current_segmentation_key, {}),
             )
             QMessageBox.information(self, "Save Successful", f"Segmentation saved successfully:\n{file_path}")
+            return True
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Failed to save segmentation: {str(e)}")
+            return False
 
     # Code for volume management
 
