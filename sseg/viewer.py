@@ -35,12 +35,13 @@ from scipy.ndimage import rotate, binary_dilation, binary_erosion
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import ListedColormap, Normalize
-from PyQt5.QtCore import Qt, QPoint, QEvent, QSettings, QTimer
+from PyQt5.QtCore import Qt, QPoint, QEvent, QSettings, QTimer, pyqtSignal
 from scipy.ndimage import binary_fill_holes
 from queue import Queue
 from functools import partial
 from collections import deque
 
+from .batch_discovery import exam_sort_key
 from .dialogs import ParameterDialog, RotationDialog
 from .hotkeys import GlobalHotkeyFilter
 from .icons import make_hand_icon
@@ -62,6 +63,9 @@ from .slice_views import SliceViewMixin
 
 
 class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindow):
+    # Emitted (after unsaved changes are handled) when the user asks to go back to the startup / exam discovery window
+    return_to_discovery_requested = pyqtSignal()
+
     def __init__(self, volume_paths, segmentation_paths, segmentation_suffixes, suffix_to_replace, ROI_mask_path, parent=None):
         super(MRIViewer, self).__init__(parent)
         
@@ -76,6 +80,12 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
 
         # Initializing menu tool bar
         self.menu_bar = self.menuBar()
+        self.session_menu = QMenu("Session", self)
+        self.menu_bar.addMenu(self.session_menu)
+        self.return_to_discovery_action = QAction("Return to Exam Discovery…", self)
+        self.return_to_discovery_action.setToolTip("Close this viewer and reopen the sseg startup / exam discovery window")
+        self.return_to_discovery_action.triggered.connect(self.request_return_to_discovery)
+        self.session_menu.addAction(self.return_to_discovery_action)
         # Menus with checkable items stay open while items are toggled (click elsewhere or press Esc to close)
         self.tools_menu = PersistentMenu("Tools", self, tear_off=False)
         self.menu_bar.addMenu(self.tools_menu)
@@ -534,9 +544,33 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.batch_show_action.setToolTip("Show the multi-patient exam selection window")
             self.batch_show_action.triggered.connect(self.show_batch_dock)
             self.toolbar.insertAction(self._pan_separator, self.batch_show_action)  # near the front so it never lands in the overflow menu
+            self.return_to_discovery_action.setIconText("Exam Discovery")
+            self.toolbar.insertAction(self._pan_separator, self.return_to_discovery_action)
             self.display_menu.addAction(self.batch_dock.toggleViewAction())
             self.batch_dock.toggleViewAction().setText("Exam list")
         self.populate_batch_exam_tree()
+
+    def request_return_to_discovery(self):
+        if self.has_unsaved_segmentations():
+            choice = self.prompt_save_discard_or_cancel(
+                title="Return to Exam Discovery",
+                message="There are unsaved segmentation changes in the current exam. Save them before returning to exam discovery?",
+            )
+            if choice == "cancel":
+                return
+            if choice == "save" and not self.save_dirty_segmentations_interactive():
+                return
+        self.return_to_discovery_requested.emit()
+
+    def dispose(self):
+        """Close the viewer and release app-wide hooks and VTK resources so a new viewer can replace it."""
+        QApplication.instance().removeEventFilter(self.global_hotkey_filter)
+        self.close()
+        try:
+            self.plotter_3d.close()
+        except Exception:
+            pass
+        self.deleteLater()
 
     def set_3d_hover_marker(self, enabled):
         self.show_3d_hover_marker = bool(enabled)
@@ -619,7 +653,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 if not all(series in available for series in selected_series):
                     continue
             exams.append(exam)
-        exams.sort(key=lambda exam: (exam.patient_id.lower(), exam.exam_id.lower(), exam.exam_dir.lower()))
+        exams.sort(key=exam_sort_key)
         return exams
 
     def populate_batch_exam_tree(self):

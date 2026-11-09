@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Optional
@@ -62,6 +63,23 @@ def _infer_series_type_and_suffix(filename: str, volume_suffixes: list[str]) -> 
         return '', ''
     base = filename[:len(filename) - len(suffix)].rstrip('_')
     return base.split('_')[-1], suffix
+
+
+# Integers, with a leading '-' treated as a minus sign unless it follows a digit
+# (so 'd-12' is -12, but the dashes in '2020-01-05' are separators).
+_NATURAL_NUMBER_RE = re.compile(r'((?<![0-9])-[0-9]+|[0-9]+)')
+
+
+def natural_sort_key(text: str) -> tuple:
+    """Sort key that orders embedded numbers numerically: d-203, d-1, d0, d29, d120."""
+    # re.split with a capture group alternates text, number, text, ..., so the
+    # str/int positions line up between keys and tuple comparison never mixes types.
+    parts = _NATURAL_NUMBER_RE.split(text)
+    return tuple(int(part) if i % 2 else part.casefold() for i, part in enumerate(parts))
+
+
+def exam_sort_key(exam: DiscoveredExam) -> tuple:
+    return (natural_sort_key(exam.patient_id), natural_sort_key(exam.exam_id), natural_sort_key(exam.exam_dir))
 
 
 def _round_float_list(values, ndigits=5):
@@ -276,7 +294,7 @@ def discover_exams(root_dir: str, settings: BatchDiscoverySettings, progress_cal
         else:
             result.skipped_dirs.append({'dir': str(path), 'reason': reason})
 
-    result.exams.sort(key=lambda e: (e.patient_id.lower(), e.exam_id.lower(), e.exam_dir.lower()))
+    result.exams.sort(key=exam_sort_key)
     detected = get_detected_suffixes(result)
     if detected and not result.launch_selection.selected_suffix:
         result.launch_selection.selected_suffix = detected[0]

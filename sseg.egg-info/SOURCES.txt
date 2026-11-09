@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 sseg/__init__.py
+sseg/__main__.py
 sseg/app.py
 sseg/batch_discovery.py
 sseg/batch_io.py
@@ -8,8 +9,10 @@ sseg/batch_models.py
 sseg/cli.py
 sseg/dialogs.py
 sseg/hotkeys.py
+sseg/icons.py
 sseg/io_utils.py
 sseg/menus.py
+sseg/perf.py
 sseg/rendering.py
 sseg/segmentation_ops.py
 sseg/slice_views.py

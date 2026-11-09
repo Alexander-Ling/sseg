@@ -18,6 +18,7 @@ from .batch_discovery import (
     analyze_exam,
     discover_exams,
     exam_has_all_selected_series,
+    exam_sort_key,
     get_available_series_types_for_suffix,
     count_exams_with_suffix,
     get_detected_suffixes,
@@ -288,6 +289,7 @@ class BatchDiscoveryTab(QWidget):
         # Re-analyze in case settings or persisted content changed.
         for exam in result.exams:
             analyze_exam(exam, result.settings)
+        result.exams.sort(key=exam_sort_key)  # JSON saved by older versions may use plain alphabetical order
 
         self._update_selection_controls()
         self.refresh_results_table()

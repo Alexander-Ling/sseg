@@ -5,7 +5,7 @@ import sys
 
 from PyQt5.QtWidgets import QApplication
 
-from .app import create_viewer_from_config, run_gui
+from .app import create_viewer_from_config, run_gui, show_viewer
 from .startup import StartupConfig
 
 
@@ -41,7 +41,7 @@ def main(argv=None) -> int:
                 roi_mask_path=args.roi_mask,
             )
             viewer = create_viewer_from_config(config)
-            viewer.show()
+            show_viewer(viewer)
             return app.exec_()
         return run_gui(startup=True, argv=argv)
 
