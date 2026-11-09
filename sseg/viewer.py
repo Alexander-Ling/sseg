@@ -57,6 +57,7 @@ from .io_utils import (
     save_segmentation_nrrd,
 )
 from .menus import PersistentMenu
+from .name_combo import NameComboBox
 from .rendering import RenderingMixin
 from .segmentation_ops import SegmentationOpsMixin
 from .slice_views import SliceViewMixin
@@ -335,14 +336,6 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.showMaximized()
             self.display_all_slices()
 
-    def _clear_combo_items(self, combo, keep_items=None):
-        keep_items = list(keep_items or [])
-        combo.blockSignals(True)
-        combo.clear()
-        for item in keep_items:
-            combo.addItem(item)
-        combo.blockSignals(False)
-
     def reset_2d_view_state(self):
         for view in [self.view_axial, self.view_coronal, self.view_sagittal]:
             try:
@@ -419,9 +412,9 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self.segmentation_dirty = {}
         self.batch_current_exam = None
 
-        self._clear_combo_items(self.volume_combo)
-        self._clear_combo_items(self.segmentation_combo, keep_items=["None", "Create new segmentation"])
-        self.segmentation_combo.setCurrentText("None")
+        self.volume_combo.clear_names()
+        self.segmentation_combo.clear_names(keep_special=["None", "Create new segmentation"])
+        self.segmentation_combo.set_current_name("None")
         self.update_level_name_display()
         self.update_segment_visibility_menu()
         self.update_overwrite_levels_menu()
@@ -780,7 +773,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.segmentation_volumes[seg_name] = np.array(self.segmentation_volumes[source_key], copy=True)
             self.segmentation_names[seg_name] = dict(self.segmentation_names.get(source_key, {}))
             self.segmentation_dirty[seg_name] = True
-            self.segmentation_combo.addItem(seg_name)
+            self.segmentation_combo.add_name(seg_name)
             self.switch_segmentation(seg_name)
 
             # Remove the source segmentation from the viewer so the replacement truly
@@ -789,9 +782,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 self.segmentation_volumes.pop(source_key, None)
                 self.segmentation_names.pop(source_key, None)
                 self.segmentation_dirty.pop(source_key, None)
-                idx = self.segmentation_combo.findText(source_key)
-                if idx >= 0:
-                    self.segmentation_combo.removeItem(idx)
+                self.segmentation_combo.remove_name(source_key)
             self.segmentation_paths = []
             return
 
@@ -920,8 +911,8 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.mri_volumes[volume_name] = (data, affine, voxel_dims, data, affine, voxel_dims)
             if file_path not in self.volume_paths:
                 self.volume_paths.append(file_path)
-            if self.volume_combo.findText(volume_name) < 0:
-                self.volume_combo.addItem(volume_name)
+            if self.volume_combo.find_name(volume_name) < 0:
+                self.volume_combo.add_name(volume_name)
             if self.selected_volume is None or not self.initial_load:
                 self.switch_volume(volume_name)
 
@@ -1026,7 +1017,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.global_min = self.original_data.min()
             self.global_max = self.original_data.max()
             self.selected_volume = name
-            self.volume_combo.setCurrentText(self.selected_volume)
+            self.volume_combo.set_current_name(self.selected_volume)
             reinitialize_views = (old_data_shape is None) or (self.data.shape != old_data_shape)
             if None in (self.axial_index, self.coronal_index, self.sagittal_index) or reinitialize_views:
                 self.axial_index = self.data.shape[2] // 2
@@ -1074,12 +1065,12 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         if reply == QMessageBox.Yes:
             deleted_name = self.selected_volume
             del self.mri_volumes[deleted_name]
-            index = self.volume_combo.findText(deleted_name)
-            self.volume_combo.removeItem(index)
+            index = self.volume_combo.find_name(deleted_name)
+            self.volume_combo.remove_name(deleted_name)
             if self.mri_volumes:
                 new_index = max(0, index - 1)
                 if new_index < self.volume_combo.count():
-                    self.switch_volume(self.volume_combo.itemText(new_index))
+                    self.switch_volume(self.volume_combo.name_at(new_index))
                 else:
                     self.switch_volume(next(iter(self.mri_volumes.keys())))
             else:
@@ -1092,8 +1083,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                                                 text=self.selected_volume)
             if ok and new_name:
                 self.mri_volumes[new_name] = self.mri_volumes.pop(self.selected_volume)
-                index = self.volume_combo.findText(self.selected_volume)
-                self.volume_combo.setItemText(index, new_name)
+                self.volume_combo.rename(self.selected_volume, new_name)
                 self.selected_volume = new_name
                 QMessageBox.information(self, "Rename Volume", "Volume renamed successfully!")
 
@@ -1133,7 +1123,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         self._swap_region(self.redo_stack, self.undo_stack, "No actions to redo.",
                           "No actions to redo for the current segmentation.", "Redo")
         if self.current_segmentation_key:
-            self.segmentation_combo.setCurrentText(self.current_segmentation_key)
+            self.segmentation_combo.set_current_name(self.current_segmentation_key)
 
     def push_to_undo_stack(self, bbox=None):
         # Store the pre-edit values of the region about to change (the whole volume if no bbox is given)
@@ -1288,23 +1278,24 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         # Label and combobox for selecting volumes
         volume_label = QLabel("Select MRI Volume:")
         self.toolbar.addWidget(volume_label)
-        self.volume_combo = QComboBox()
+        self.volume_combo = NameComboBox()
         self.volume_combo.setMinimumContentsLength(18)
         self.volume_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.volume_combo.setMinimumWidth(220)
-        self.volume_combo.activated[str].connect(self.switch_volume)
+        self.volume_combo.nameActivated.connect(self.switch_volume)
         self.toolbar.addWidget(self.volume_combo)
 
         # Label and combobox for selecting segmentations
         segmentation_label = QLabel("Select Segmentation:")
         self.toolbar.addWidget(segmentation_label)
-        self.segmentation_combo = QComboBox()
+        self.segmentation_combo = NameComboBox()
         self.segmentation_combo.setMinimumContentsLength(18)
         self.segmentation_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.segmentation_combo.setMinimumWidth(220)
-        self.segmentation_combo.addItem("None")  # Default item indicating no segmentation selected
-        self.segmentation_combo.addItems(list(self.segmentation_volumes.keys()))
-        self.segmentation_combo.activated[str].connect(self.handle_segmentation_selection)
+        self.segmentation_combo.add_name("None", special=True)  # Default item indicating no segmentation selected
+        for seg_name in self.segmentation_volumes.keys():
+            self.segmentation_combo.add_name(seg_name)
+        self.segmentation_combo.nameActivated.connect(self.handle_segmentation_selection)
         self.toolbar.addWidget(self.segmentation_combo)
 
         # Label and dropdown menu for selecting the segmentation tool
@@ -1672,7 +1663,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.segmentation_volumes[name] = new_segmentation
             self.segmentation_names[name] = {}
             self.segmentation_dirty[name] = True
-            self.segmentation_combo.addItem(name)
+            self.segmentation_combo.add_name(name)
             self.switch_segmentation(name)
 
     def reorient_affine_space_to_ras(self, affine, current_space):
@@ -1725,14 +1716,14 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 self.segmentation_volumes[seg_name] = data
                 self.segmentation_names[seg_name] = level_names
                 self.segmentation_dirty[seg_name] = False
-                self.segmentation_combo.addItem(seg_name)
+                self.segmentation_combo.add_name(seg_name)
                 loaded_paths.append(seg_path)
             except Exception as e:
                 failed_files.append(f"{os.path.basename(seg_path)}: {str(e)}")
 
         if loaded_paths:
             last_seg_name = os.path.basename(loaded_paths[-1])
-            self.segmentation_combo.setCurrentText(last_seg_name)
+            self.segmentation_combo.set_current_name(last_seg_name)
             self.current_segmentation = self.segmentation_volumes[last_seg_name]
             self.current_segmentation_key = last_seg_name
             self.unique_levels = np.unique(self.current_segmentation)
@@ -1764,7 +1755,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 del self.segmentation_volumes[self.current_segmentation_key]
                 self.segmentation_names.pop(self.current_segmentation_key, None)
                 self.segmentation_dirty.pop(self.current_segmentation_key, None)
-                self.segmentation_combo.removeItem(self.segmentation_combo.findText(self.current_segmentation_key))
+                self.segmentation_combo.remove_name(self.current_segmentation_key)
                 self.switch_segmentation(None)
 
     def rename_segmentation(self):
@@ -1777,8 +1768,7 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
                 self.segmentation_volumes[new_name] = self.segmentation_volumes.pop(old_name)
                 self.segmentation_names[new_name] = self.segmentation_names.pop(old_name, {})
                 self.segmentation_dirty[new_name] = self.segmentation_dirty.pop(old_name, False)
-                index = self.segmentation_combo.findText(old_name)
-                self.segmentation_combo.setItemText(index, new_name)
+                self.segmentation_combo.rename(old_name, new_name)
                 self.current_segmentation_key = new_name
                 self.mark_segmentation_dirty(new_name, True)
 
@@ -2022,12 +2012,12 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             self.current_segmentation = None
             self.current_segmentation_key = None
             self.unique_levels = np.array([0])
-            self.segmentation_combo.setCurrentText("None")
+            self.segmentation_combo.set_current_name("None")
         else:
             self.current_segmentation = self.segmentation_volumes.get(name)
             self.current_segmentation_key = name
             self.unique_levels = np.unique(self.current_segmentation) if self.current_segmentation is not None else np.array([0])
-            self.segmentation_combo.setCurrentText(name)
+            self.segmentation_combo.set_current_name(name)
         self.update_level_name_display()
         self.update_segment_visibility_menu()
         self.update_overwrite_levels_menu()
