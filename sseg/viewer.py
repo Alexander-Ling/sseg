@@ -41,7 +41,7 @@ from queue import Queue
 from functools import partial
 from collections import deque
 
-from .batch_discovery import exam_sort_key
+from .batch_discovery import exam_sort_key, get_exam_segmentation_paths
 from .dialogs import ParameterDialog, RotationDialog
 from .hotkeys import GlobalHotkeyFilter
 from .icons import make_hand_icon
@@ -712,10 +712,12 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
         selected_series = list(selection.selected_series_types or []) if selection else []
         available = exam.available_series_types_by_suffix.get(suffix, []) if suffix else []
         planned = [series for series in selected_series if series in available] if selected_series else list(available)
+        planned_segs = [os.path.basename(p) for p in self.get_batch_exam_load_plan(exam)['segmentation_paths']]
         self.batch_status_label.setText(
             f"Selected exam: {exam.exam_id}\n"
             f"Suffix: {suffix or 'none'}\n"
-            f"Series to load: {', '.join(planned) if planned else 'none'}"
+            f"Series to load: {', '.join(planned) if planned else 'none'}\n"
+            f"Segmentations to load: {', '.join(planned_segs) if planned_segs else 'none'}"
         )
 
     def get_batch_exam_load_plan(self, exam):
@@ -739,55 +741,14 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             series_files.sort(key=lambda sf: (sf.series_type.lower(), sf.filename.lower()))
         volume_paths = [sf.path for sf in series_files]
 
-        replacement_suffix = (selection.replacement_segmentation_suffix or '').strip() if selection else ''
-        segmentation_paths = []
-        # Always load the preferred existing segmentation when one is available.
-        # If a replacement suffix is requested, the loaded segmentation will be
-        # copied/renamed into the replacement output name rather than skipped.
-        if exam.preferred_segmentation_path:
-            segmentation_paths = [exam.preferred_segmentation_path]
+        selected_seg_types = selection.selected_segmentation_types if selection else None
+        segmentation_paths = get_exam_segmentation_paths(exam, selected_seg_types)
 
         return {
             'volume_paths': volume_paths,
             'roi_mask_path': exam.brainmask_path,
             'segmentation_paths': segmentation_paths,
-            'replacement_segmentation_suffix': replacement_suffix,
         }
-
-    def create_batch_replacement_segmentation(self, exam, replacement_suffix, source_segmentation_path=None):
-        replacement_suffix = (replacement_suffix or '').strip()
-        if not replacement_suffix:
-            return
-        if replacement_suffix.startswith('_'):
-            seg_name = f"{exam.exam_id}{replacement_suffix}"
-        else:
-            seg_name = f"{exam.exam_id}_{replacement_suffix}"
-        if seg_name in self.segmentation_volumes:
-            self.switch_segmentation(seg_name)
-            return
-
-        source_key = os.path.basename(source_segmentation_path) if source_segmentation_path else None
-        if source_key and source_key in self.segmentation_volumes:
-            # In batch mode, a replacement suffix should preserve the loaded segmentation
-            # contents and simply prepare a new output-named copy for editing/saving.
-            self.segmentation_volumes[seg_name] = np.array(self.segmentation_volumes[source_key], copy=True)
-            self.segmentation_names[seg_name] = dict(self.segmentation_names.get(source_key, {}))
-            self.segmentation_dirty[seg_name] = True
-            self.segmentation_combo.add_name(seg_name)
-            self.switch_segmentation(seg_name)
-
-            # Remove the source segmentation from the viewer so the replacement truly
-            # acts like a rename rather than leaving a duplicate loaded entry around.
-            if source_key != seg_name:
-                self.segmentation_volumes.pop(source_key, None)
-                self.segmentation_names.pop(source_key, None)
-                self.segmentation_dirty.pop(source_key, None)
-                self.segmentation_combo.remove_name(source_key)
-            self.segmentation_paths = []
-            return
-
-        self.create_new_segmentation(seg_name)
-        self.mark_segmentation_dirty(seg_name, True)
 
     def load_selected_batch_exam(self):
         exam = self.get_selected_batch_exam()
@@ -830,10 +791,6 @@ class MRIViewer(RenderingMixin, SegmentationOpsMixin, SliceViewMixin, QMainWindo
             segmentation_paths = plan.get('segmentation_paths', [])
             if segmentation_paths:
                 self.load_segmentation(segmentation_paths)
-            replacement_suffix = plan.get('replacement_segmentation_suffix', '')
-            if replacement_suffix:
-                source_segmentation_path = segmentation_paths[0] if segmentation_paths else None
-                self.create_batch_replacement_segmentation(exam, replacement_suffix, source_segmentation_path=source_segmentation_path)
             if self.data is not None:
                 self.display_all_slices()
                 self.update_visualization(reset_volume=True)

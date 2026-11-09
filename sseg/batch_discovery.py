@@ -52,6 +52,27 @@ def match_volume_suffix(filename: str, volume_suffixes: list[str]) -> Optional[s
     return max(matches, key=len) if matches else None
 
 
+def segmentation_type_for_suffix(suffix: str) -> str:
+    """'_tumor-segmentation.nii.gz' -> '_tumor-segmentation'; suffixes differing only by extension share a type."""
+    return strip_known_image_extension(suffix)
+
+
+def get_segmentation_types(settings: BatchDiscoverySettings) -> list[str]:
+    """Distinct segmentation types from the configured suffixes, in settings order."""
+    types: list[str] = []
+    for sfx in settings.segmentation_suffixes:
+        seg_type = segmentation_type_for_suffix(sfx) if sfx else ''
+        if seg_type and seg_type not in types:
+            types.append(seg_type)
+    return types
+
+
+def match_segmentation_suffix(filename: str, segmentation_suffixes: list[str]) -> Optional[str]:
+    """Return the configured segmentation suffix that ends the filename (longest wins), else None."""
+    matches = [sfx for sfx in segmentation_suffixes if sfx and segmentation_type_for_suffix(sfx) and filename.endswith(sfx)]
+    return max(matches, key=len) if matches else None
+
+
 def _infer_series_type_and_suffix(filename: str, volume_suffixes: list[str]) -> tuple[str, str]:
     """Split a filename into (series type, volume suffix).
 
@@ -247,17 +268,18 @@ def analyze_exam(exam: DiscoveredExam, settings: Optional[BatchDiscoverySettings
                 exam.brainmask_path = str(matches[0])
                 break
 
-    # segmentation preference list in order
-    seg_paths = []
-    seen = set()
-    for sfx in settings.segmentation_suffixes:
-        for base_dir in (exam_dir, patient_dir):
-            for p in sorted(base_dir.iterdir() if base_dir.exists() else []):
-                if p.is_file() and p.name.endswith(sfx):
-                    sp = str(p)
-                    if sp not in seen:
-                        seg_paths.append(sp)
-                        seen.add(sp)
+    # Group segmentation files by type, in settings order. Each file belongs only to the type of
+    # its longest matching suffix, so overlapping suffixes never claim the same file twice.
+    by_type: dict[str, list[str]] = {seg_type: [] for seg_type in get_segmentation_types(settings)}
+    for base_dir in (exam_dir, patient_dir):
+        for p in sorted(base_dir.iterdir() if base_dir.exists() else []):
+            if not p.is_file():
+                continue
+            sfx = match_segmentation_suffix(p.name, settings.segmentation_suffixes)
+            if sfx is not None:
+                by_type[segmentation_type_for_suffix(sfx)].append(str(p))
+    exam.segmentation_paths_by_type = {seg_type: paths for seg_type, paths in by_type.items() if paths}
+    seg_paths = [p for paths in exam.segmentation_paths_by_type.values() for p in paths]
     exam.segmentation_paths = seg_paths
     exam.preferred_segmentation_path = seg_paths[0] if seg_paths else None
     return exam
@@ -318,6 +340,35 @@ def get_available_series_types_for_suffix(result: BatchDiscoveryResult, suffix: 
     for exam in result.exams:
         series_types.update(exam.available_series_types_by_suffix.get(suffix, []))
     return sorted(series_types)
+
+
+def get_detected_segmentation_types(result: BatchDiscoveryResult) -> list[str]:
+    """Segmentation types found in at least one exam, in settings order."""
+    found = {seg_type for exam in result.exams for seg_type in exam.segmentation_paths_by_type}
+    return [seg_type for seg_type in get_segmentation_types(result.settings) if seg_type in found]
+
+
+def count_exams_with_segmentation_type(result: BatchDiscoveryResult, seg_type: str) -> int:
+    return sum(1 for exam in result.exams if seg_type in exam.segmentation_paths_by_type)
+
+
+def get_exam_segmentation_paths(exam: DiscoveredExam, selected_types: Optional[list[str]]) -> list[str]:
+    """Segmentation files to load for an exam. selected_types=None means every type.
+
+    Files with the same name (e.g. one in the exam folder and one in the patient folder)
+    are loaded once, preferring the exam folder copy.
+    """
+    paths = []
+    names = set()
+    for seg_type, type_paths in exam.segmentation_paths_by_type.items():
+        if selected_types is not None and seg_type not in selected_types:
+            continue
+        for path in type_paths:
+            name = Path(path).name
+            if name not in names:
+                paths.append(path)
+                names.add(name)
+    return paths
 
 
 def exam_has_all_selected_series(exam: DiscoveredExam, suffix: str, selected_series: list[str]) -> bool:

@@ -20,8 +20,11 @@ from .batch_discovery import (
     exam_has_all_selected_series,
     exam_sort_key,
     get_available_series_types_for_suffix,
+    count_exams_with_segmentation_type,
     count_exams_with_suffix,
+    get_detected_segmentation_types,
     get_detected_suffixes,
+    get_exam_segmentation_paths,
 )
 from .batch_io import load_batch_discovery, save_batch_discovery
 from .batch_models import (
@@ -113,10 +116,11 @@ class BatchDiscoveryTab(QWidget):
         self.require_all_checkbox = QCheckBox('Only display exams that contain all selected series')
         self.require_all_checkbox.toggled.connect(self.refresh_results_table)
         planning_form.addRow('', self.require_all_checkbox)
-        self.new_seg_suffix_edit = QLineEdit()
-        self.new_seg_suffix_edit.setPlaceholderText('Optional new segmentation suffix, e.g. _tumor-segmentation-v2.nii.gz')
-        self.new_seg_suffix_edit.textChanged.connect(self.on_new_seg_suffix_changed)
-        planning_form.addRow('New segmentation suffix:', self.new_seg_suffix_edit)
+        self.seg_type_list = QListWidget()
+        self.seg_type_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.seg_type_list.itemSelectionChanged.connect(self.on_seg_type_selection_changed)
+        self.seg_type_list.setMinimumHeight(70)
+        planning_form.addRow('Segmentation types to load:', self.seg_type_list)
         root.addWidget(planning_group)
 
         results_group = QGroupBox('Discovered exams')
@@ -127,7 +131,7 @@ class BatchDiscoveryTab(QWidget):
         self.results_table.setMinimumHeight(180)
         self.results_table.setHorizontalHeaderLabels([
             'Patient', 'Exam', 'Exam Directory', 'Series Volumes', 'Volume Types',
-            'Series Types', 'Brainmask', 'Segmentation', 'Subdirs'
+            'Series Types', 'Brainmask', 'Segmentations', 'Subdirs'
         ])
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -215,7 +219,7 @@ class BatchDiscoveryTab(QWidget):
             self.suffix_combo.blockSignals(False)
             self.series_list.clear()
             self.require_all_checkbox.setChecked(False)
-            self.new_seg_suffix_edit.setText('')
+            self.seg_type_list.clear()
             return
         sel = self.discovery_result.launch_selection
         detected_suffixes = get_detected_suffixes(self.discovery_result)
@@ -236,10 +240,8 @@ class BatchDiscoveryTab(QWidget):
         self.require_all_checkbox.blockSignals(True)
         self.require_all_checkbox.setChecked(bool(sel.require_all_selected_series))
         self.require_all_checkbox.blockSignals(False)
-        self.new_seg_suffix_edit.blockSignals(True)
-        self.new_seg_suffix_edit.setText(sel.replacement_segmentation_suffix or '')
-        self.new_seg_suffix_edit.blockSignals(False)
         self._populate_series_list()
+        self._populate_seg_type_list()
 
     def _populate_series_list(self) -> None:
         self.series_list.clear()
@@ -272,10 +274,30 @@ class BatchDiscoveryTab(QWidget):
         self.discovery_result.launch_selection.selected_series_types = [item.text() for item in self.series_list.selectedItems()]
         self.refresh_results_table()
 
-    def on_new_seg_suffix_changed(self) -> None:
+    def _populate_seg_type_list(self) -> None:
+        self.seg_type_list.blockSignals(True)
+        self.seg_type_list.clear()
+        if self.discovery_result is not None:
+            sel = self.discovery_result.launch_selection
+            detected = get_detected_segmentation_types(self.discovery_result)
+            if sel.selected_segmentation_types is not None:
+                sel.selected_segmentation_types = [t for t in sel.selected_segmentation_types if t in detected]
+            for seg_type in detected:
+                item = QListWidgetItem(seg_type)
+                item.setToolTip(f'Found in {count_exams_with_segmentation_type(self.discovery_result, seg_type)} exam(s)')
+                self.seg_type_list.addItem(item)
+                # None means nothing has been chosen yet: default to loading every type
+                if sel.selected_segmentation_types is None or seg_type in sel.selected_segmentation_types:
+                    item.setSelected(True)
+        self.seg_type_list.blockSignals(False)
+
+    def on_seg_type_selection_changed(self) -> None:
         if self.discovery_result is None:
             return
-        self.discovery_result.launch_selection.replacement_segmentation_suffix = self.new_seg_suffix_edit.text().strip()
+        self.discovery_result.launch_selection.selected_segmentation_types = [
+            self.seg_type_list.item(i).text() for i in range(self.seg_type_list.count()) if self.seg_type_list.item(i).isSelected()
+        ]
+        self.refresh_results_table()
 
     def set_discovery_result(self, result: BatchDiscoveryResult) -> None:
         self.discovery_result = result
@@ -306,6 +328,7 @@ class BatchDiscoveryTab(QWidget):
         require_all = bool(self.require_all_checkbox.isChecked())
         result.launch_selection.require_all_selected_series = require_all
 
+        selected_seg_types = result.launch_selection.selected_segmentation_types
         rows = []
         for exam in result.exams:
             if suffix and suffix not in exam.available_suffixes:
@@ -322,7 +345,8 @@ class BatchDiscoveryTab(QWidget):
                 exam_dir_display = str(Path(exam.exam_dir).resolve().relative_to(Path(result.settings.root_dir).resolve()))
             except Exception:
                 exam_dir_display = exam.exam_dir
-            rows.append((exam, [
+            seg_paths = get_exam_segmentation_paths(exam, selected_seg_types)
+            rows.append((exam, seg_paths, [
                 exam.patient_id,
                 exam.exam_id,
                 exam_dir_display,
@@ -330,12 +354,12 @@ class BatchDiscoveryTab(QWidget):
                 suffixes_display,
                 series_display,
                 Path(exam.brainmask_path).name if exam.brainmask_path else '',
-                Path(exam.preferred_segmentation_path).name if exam.preferred_segmentation_path else '',
+                ', '.join(Path(p).name for p in seg_paths),
                 ', '.join(exam.subdirs_present),
             ]))
 
         self.results_table.setRowCount(len(rows))
-        for row, (exam_obj, values) in enumerate(rows):
+        for row, (exam_obj, seg_paths, values) in enumerate(rows):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
@@ -343,8 +367,8 @@ class BatchDiscoveryTab(QWidget):
                     item.setToolTip(exam_obj.exam_dir)
                 elif col == 6 and exam_obj.brainmask_path:
                     item.setToolTip(exam_obj.brainmask_path)
-                elif col == 7 and exam_obj.preferred_segmentation_path:
-                    item.setToolTip(exam_obj.preferred_segmentation_path)
+                elif col == 7 and seg_paths:
+                    item.setToolTip('\n'.join(seg_paths))
                 if col == 3:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.results_table.setItem(row, col, item)

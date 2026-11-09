@@ -43,6 +43,8 @@ class DiscoveredExam:
     preferred_group_by_suffix: dict[str, str] = field(default_factory=dict)
     brainmask_path: Optional[str] = None
     segmentation_paths: list[str] = field(default_factory=list)
+    # Segmentation type (configured suffix without its file extension) -> matching files
+    segmentation_paths_by_type: dict[str, list[str]] = field(default_factory=dict)
     preferred_segmentation_path: Optional[str] = None
 
 
@@ -63,7 +65,8 @@ class BatchLaunchSelection:
     selected_suffix: Optional[str] = None
     selected_series_types: list[str] = field(default_factory=list)
     require_all_selected_series: bool = False
-    replacement_segmentation_suffix: str = ""
+    # None means every detected segmentation type is loaded; [] means none are
+    selected_segmentation_types: Optional[list[str]] = None
 
 
 @dataclass
@@ -87,5 +90,6 @@ class BatchDiscoveryResult:
             item["series_files"] = sf
             exams.append(DiscoveredExam(**item))
         skipped = list(data.get("skipped_dirs", []))
-        launch_sel = BatchLaunchSelection(**data.get("launch_selection", {}))
+        known_sel = BatchLaunchSelection.__dataclass_fields__
+        launch_sel = BatchLaunchSelection(**{k: v for k, v in data.get("launch_selection", {}).items() if k in known_sel})
         return cls(settings=settings, exams=exams, skipped_dirs=skipped, launch_selection=launch_sel)
