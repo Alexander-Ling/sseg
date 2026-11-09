@@ -1,6 +1,5 @@
 """Rendering helpers and view update mixins for the sseg viewer."""
 
-import itertools
 import os
 
 import matplotlib.colors as mcolors
@@ -470,12 +469,12 @@ class RenderingMixin:
             return image.copy()  # detach from the numpy buffer, which is freed when this function returns
 
     def assign_colors_to_levels(self, levels):
-            # Reset or clear the previous level color map
+            # Colors depend only on the level number (level 1 is always the first color, etc.),
+            # so they stay consistent across files even when some levels are missing.
             self.level_color_map = {}
-            color_cycle = itertools.cycle(self.color_map)  # Create a repeating iterator over the colors
             for level in levels:
                 if level != 0:  # Avoid assigning a color to the background
-                    self.level_color_map[level] = next(color_cycle)
+                    self.level_color_map[level] = self.color_map[(int(level) - 1) % len(self.color_map)]
 
     def get_color_for_level(self, level, alpha):
             if level in self.invisible_levels:
