@@ -53,6 +53,8 @@ class BatchDiscoveryTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.discovery_result: Optional[BatchDiscoveryResult] = None
+        # Launch choices from a cleared result, reapplied to the next scan.
+        self._pending_launch_selection: Optional[BatchLaunchSelection] = None
 
         root = QVBoxLayout(self)
         intro = QLabel(
@@ -204,6 +206,8 @@ class BatchDiscoveryTab(QWidget):
         finally:
             progress.close()
 
+        if self._pending_launch_selection is not None:
+            result.launch_selection = self._pending_launch_selection
         self.set_discovery_result(result)
         if not result.exams:
             QMessageBox.information(
@@ -301,6 +305,7 @@ class BatchDiscoveryTab(QWidget):
 
     def set_discovery_result(self, result: BatchDiscoveryResult) -> None:
         self.discovery_result = result
+        self._pending_launch_selection = None
         self.root_dir_edit.setText(result.settings.root_dir)
         self.extensions_edit.setText(' '.join(result.settings.image_extensions))
         self.brainmask_edit.setPlainText('\n'.join(result.settings.brainmask_suffixes))
@@ -308,13 +313,27 @@ class BatchDiscoveryTab(QWidget):
         self.verify_compat_checkbox.setChecked(bool(getattr(result.settings, 'verify_scan_compatibility', False)))
         self.volume_suffix_edit.setPlainText('\n'.join(result.settings.volume_suffixes))
 
-        # Re-analyze in case settings or persisted content changed.
+        # Re-analyze in case settings or persisted content changed. Exam folders that were
+        # renamed, moved, or deleted since discovery are dropped until the next rescan.
+        missing = [exam for exam in result.exams if not Path(exam.exam_dir).is_dir()]
+        if missing:
+            result.exams = [exam for exam in result.exams if exam not in missing]
+            result.skipped_dirs.extend({'dir': exam.exam_dir, 'reason': 'exam directory no longer exists'} for exam in missing)
         for exam in result.exams:
             analyze_exam(exam, result.settings)
         result.exams.sort(key=exam_sort_key)  # JSON saved by older versions may use plain alphabetical order
 
         self._update_selection_controls()
         self.refresh_results_table()
+
+    def clear_discovery_result(self) -> None:
+        """Drop the scanned exams but keep the search settings, so the user must re-scan."""
+        if self.discovery_result is not None:
+            self._pending_launch_selection = self.discovery_result.launch_selection
+        self.discovery_result = None
+        self._update_selection_controls()
+        self.refresh_results_table()
+        self.summary_label.setText('Exam list cleared. Re-scan the directory to continue segmenting.')
 
     def refresh_results_table(self) -> None:
         result = self.discovery_result

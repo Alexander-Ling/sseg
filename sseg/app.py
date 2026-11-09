@@ -28,7 +28,8 @@ def create_viewer_from_config(config: StartupConfig) -> MRIViewer:
 def show_viewer(viewer: MRIViewer, dialog: Optional[StartupDialog] = None) -> None:
     """Show a viewer whose "Return to Exam Discovery" action reopens the startup dialog.
 
-    The same dialog instance is reused so the scanned exams and batch selections are kept.
+    The same dialog instance is reused so the batch search settings and selections are kept;
+    the scanned exams are cleared and must be re-scanned.
     """
     state = {'dialog': dialog}
 
@@ -40,9 +41,8 @@ def show_viewer(viewer: MRIViewer, dialog: Optional[StartupDialog] = None) -> No
         try:
             viewer.dispose()
             startup = state['dialog'] or StartupDialog()
-            if startup.batch_tab.discovery_result is not None:
-                # Re-analyze so segmentations saved during the session show up in the table.
-                startup.batch_tab.set_discovery_result(startup.batch_tab.discovery_result)
+            # Exams may have changed on disk during the session; require a fresh scan before continuing.
+            startup.batch_tab.clear_discovery_result()
             if startup.exec_() != startup.Accepted:
                 app.quit()
                 return

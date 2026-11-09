@@ -256,23 +256,22 @@ def analyze_exam(exam: DiscoveredExam, settings: Optional[BatchDiscoverySettings
     exam.brainmask_path = None
     exam_dir = Path(exam.exam_dir)
     patient_dir = Path(exam.patient_dir)
-    for sfx in settings.brainmask_suffixes:
-        matches = sorted(p for p in exam_dir.iterdir() if p.is_file() and p.name.endswith(sfx))
-        if matches:
-            exam.brainmask_path = str(matches[0])
-            break
-    if exam.brainmask_path is None:
+    for base_dir in (exam_dir, patient_dir):
+        if not base_dir.is_dir():
+            continue
         for sfx in settings.brainmask_suffixes:
-            matches = sorted(p for p in patient_dir.iterdir() if p.is_file() and p.name.endswith(sfx))
+            matches = sorted(p for p in base_dir.iterdir() if p.is_file() and p.name.endswith(sfx))
             if matches:
                 exam.brainmask_path = str(matches[0])
                 break
+        if exam.brainmask_path is not None:
+            break
 
     # Group segmentation files by type, in settings order. Each file belongs only to the type of
     # its longest matching suffix, so overlapping suffixes never claim the same file twice.
     by_type: dict[str, list[str]] = {seg_type: [] for seg_type in get_segmentation_types(settings)}
     for base_dir in (exam_dir, patient_dir):
-        for p in sorted(base_dir.iterdir() if base_dir.exists() else []):
+        for p in sorted(base_dir.iterdir() if base_dir.is_dir() else []):
             if not p.is_file():
                 continue
             sfx = match_segmentation_suffix(p.name, settings.segmentation_suffixes)
